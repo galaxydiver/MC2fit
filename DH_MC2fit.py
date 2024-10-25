@@ -930,6 +930,623 @@ class MC2fitRun_Mulcore():
                                              ebug=self.show_multicore)
         self.multi_res=np.array(self.multi_res)
 
+class MC2fitResult():
+    """
+    Descr - Galfit result function
+    INPUT
+      0) For all input types
+      * tolerance: Chi2 tolerance for "Good results" (|Min chi2 - chi2 |/(Min chi2) < tolerance) (Default=1e-3)
+      * silent: Print text (Default=False)
+      * ignore_no_files: Run the code even though there is no any files. (Default=False)
+      * auto_input: Auto_input mode (sequence 1 -> 2 -> 3) (Default=True)
+      * group_id: If None, load all. If not, load input group ID only. (Default=None)
+
+      1) Load data
+      * fn_load: (Default='')
+      * fna_load: (Default='submodels.dat')
+      ** if None / or if it cannot find the data, go next
+      2) Runlist
+      * runlist: (Default=None)
+      * dir_work: working directory (Default=None)
+      ** if runlist is None, go next
+      3) Manual
+      * fnlist, namelist
+    """
+    def __init__(self,
+                 MC2fitSettingClass,
+                 runlist,
+                 dir_work,
+                 **kwargs):
+
+        self.runlist=runlist
+        self.dir_work=dir_work
+        self.paramslist=['XC', 'YC', 'MU_E', 'RE', 'N', 'AR', 'PA', 'MAG']
+
+#         runlist=None, dir_work=None,  ## 2) For input_runlist mode
+#         fnlist=None, namelist=None,  ## 3) For input_manual mode
+        self.group_id=None
+        self.tolerance=1e-3 # Chi2 tolerance for "Good results" (|Min chi2 - chi2 |/(Min chi2) < tolerance)
+        self.ignore_no_files=False
+        self.comp_crit='RChi_50'
+        self.input_only=False
+        self.reff_snr_crit=2
+        self.reff_snr_n_cut=100
+        self.n_crit=2
+        self.re_cut=[0,0],
+        self.extended_itemlist=['war_tot', 'is_swap', 'group_ID']
+        self.chi2_itemlist= ['CHI2NU', 'AIC_F', 'RChi_50', 'AIC_50']
+        self.comp_autoswap=False
+        self.swapmode='N'
+        self.comp_4th_nsc_autoswap=True
+        self.comp_4th_ss_autoswap=True
+        self.img_center=100
+
+
+        try: self.__dict__.update(MC2fitSettingClass.__dict__)
+        except: pass
+        self.__dict__.update(kwargs)
+        self._post_init()
+
+    def _post_init(self):
+        self.galfit_itemlist_2nd=dharray.array_attach_string(self.paramslist, '2_', add_at_head=True)
+        self.galfit_itemlist_3rd=dharray.array_attach_string(self.paramslist, '3_', add_at_head=True)
+        self.galfit_itemlist_4th=dharray.array_attach_string(self.paramslist, '4_', add_at_head=True)
+
+        # basically, galfit_itemlist= 2nd + 3rd.
+        # If there is 4th component, it will be added at 'input_runlist'
+        self.galfit_itemlist=self.galfit_itemlist_2nd+self.galfit_itemlist_3rd
+        self.extended_itemlist=self.chi2_itemlist+self.extended_itemlist
+
+#         self.dir_work=str(dir_work)
+        self.dir_work_galfit=os.path.join(self.dir_work, self.proj_folder)
+
+        self.plate_scale=dharray.value_repeat_array(self.plate_scale, 2)
+        self.image_size=dharray.value_repeat_array(self.image_size, 2)
+        self._input()
+        self._dataswap()
+
+        ## Find best
+        if(self.Data.Ndata!=0):
+            self.best=self.find_best(remove_warn=True)
+            self.best_warn=self.find_best(remove_warn=False)
+            try: self.best_near=self.find_near_best(self.Data.val[comp_crit][self.best],
+                                               tolerance=self.tolerance, comp_crit=comp_crit)
+            except: self.best_near=self.best
+        else: ## No data
+            self.best, self.best_warn, self.best_near = np.array([np.nan]), np.array([np.nan]), np.array([np.nan])
+
+
+    def _input(self):
+
+        if(self.silent==False): print("=========== Run ResultGalfit ===========\n")
+        ## ========= INPUT ===================
+        ## INPUT 2) Runlist
+        if(hasattr(self.runlist, "__len__")):  ## If runlist is not empty, use runlist
+            self._input_runlist(runlist=self.runlist, group_id=self.group_id, dir_work=self.dir_work_galfit)
+        ## INPUT 3) Manual
+        elif(hasattr(self.fnlist, "__len__")):   ## If fnlist is not empty, use fnlist
+            self._input_manual(fnlist=self.fnlist, namelist=self.namelist)
+
+        if(self.input_only): return
+
+    def _dataswap(self):
+        ## Swap 2nd and 3rd
+        self.Data.val['is_swap']=0
+        self.Data.err['is_swap']=0
+        self.Data.war['is_swap']=0
+        if(self.comp_autoswap):
+            self.swaplist=self.make_swaplist(self.swapmode)
+            self.Data.swap_data(self.swaplist, self.galfit_itemlist_2nd, self.galfit_itemlist_3rd)
+
+        if((self.comp_4th_nsc_autoswap) & (np.isin(['4_XC'], self.Data.val.dtype.names)[0])):
+            list_4th=np.isfinite(self.Data.val['4_XC'])
+            ## Double PSF - closer
+            dpsf=np.isnan(self.Data.val['3_N']) & np.isnan(self.Data.val['4_N'])
+            dist23=(self.Data.val['2_XC']-self.Data.val['3_XC'])**2 + (self.Data.val['2_YC']-self.Data.val['3_YC'])**2
+            dist24=(self.Data.val['2_XC']-self.Data.val['4_XC'])**2 + (self.Data.val['2_YC']-self.Data.val['4_YC'])**2
+            targetlist=dpsf & list_4th & (dist24<dist23)
+            self.Data.swap_data(targetlist, self.galfit_itemlist_3rd, self.galfit_itemlist_4th)
+
+        if((self.comp_4th_ss_autoswap) & (np.isin(['4_XC'], self.Data.val.dtype.names)[0])):
+            ## SS + PSF - closer to the center (except for N=5 gal)
+            ds=np.isfinite(self.Data.val['2_N']) & np.isfinite(self.Data.val['3_N'])
+            dist2=(self.Data.val['2_XC']-img_center)**2 + (self.Data.val['2_YC']-img_center)**2
+            dist3=(self.Data.val['3_XC']-img_center)**2 + (self.Data.val['3_YC']-img_center)**2
+            is_not_psf= self.Data.val['3_N']!=5
+            targetlist=ds & list_4th & (dist3<dist2) & is_not_psf
+            self.Data.swap_data(targetlist, self.galfit_itemlist_2nd, self.galfit_itemlist_3rd)
+
+
+    def _input_runlist(self, runlist, group_id=None, dir_work=None):
+        """
+        Descr - Input data using the given runlist
+        ** It will extract fnlist, namelist, and run input_manual
+        ** See input_manual as well
+        INPUT
+         - runlist
+         * group_id : (None : see all group_id)
+         * dir_work : working dir for data
+        """
+        if(self.silent==False):
+            print("\n● Input data with Runlist")
+            print(">> Group ID : ", group_id)
+
+        ## Cut runlist
+        if(group_id==None): pass
+        else: runlist=runlist[np.isin(runlist['group_ID'], group_id)]
+
+        ## Maximum Ncomponent
+        self.Ncomp_max=np.nanmax(runlist['ncomp'])
+        if(self.Ncomp_max>2):
+            self.galfit_itemlist=[]
+            for i in range (self.Ncomp_max):
+                galfit_itemlist=dharray.array_attach_string(self.paramslist, str(int(i+2))+'_', add_at_head=True)
+                self.galfit_itemlist+=galfit_itemlist
+
+        namelist=runlist['name']
+        fnlist=dharray.array_attach_string(namelist, 'result_', add_at_head=True)
+        fnlist=dharray.array_attach_string(fnlist, dir_work, add_at_head=True)
+        fnlist=dharray.array_attach_string(fnlist, '.fits')
+        self._input_manual(fnlist, namelist, runlist=runlist)
+
+    def _input_manual(self, fnlist, namelist, runlist=None):
+        """
+        Descr - Manually input data
+        ** See input_runlist as well
+        INPUT
+         - fnlist
+         - namelist
+        """
+        if(self.silent==False):
+            if(hasattr(runlist, "__len__")==False):
+                print("\n● Input data with the manual mode")
+
+        self.Data=dhgalfit.ResGalData(namelist=namelist, fnlist=fnlist,
+                            data_type=self.galfit_itemlist+self.extended_itemlist,
+                            chi2_itemlist=self.chi2_itemlist
+                            )
+
+        if(self.silent==False): print(">> # of data : ", len(fnlist))
+        if(len(self.Data.namelist)==0):
+            if(self.ignore_no_files==False): raise Exception(">> ♣♣♣ Warning! ♣♣♣ Namelist is empty!")
+            else: print(">> ♣♣♣ Warning! ♣♣♣ Namelist is empty!")
+        self.Data.read_data(itemlist=self.galfit_itemlist)
+
+        if(self.Data.Ndata==0):
+            if(self.ignore_no_files==False): raise Exception(">> ♣♣♣ Warning! ♣♣♣ No files!")
+            else: print(">> ♣♣♣ Warning! ♣♣♣ No files! .... e.g.)", fnlist[0])
+        if(self.silent==False): print(">> # of read data : ", self.Data.Ndata)
+
+        ## If it has runlist
+        if(hasattr(runlist, "__len__")):
+            self.Data.val['group_ID']=runlist['group_ID']
+            self.Data.err['group_ID']=runlist['group_ID']
+            self.Data.war['group_ID']=runlist['group_ID']
+            self.check_bound(runlist=runlist)
+            self.check_strange_radius(snr_crit=self.reff_snr_crit, reff_snr_n_cut=self.reff_snr_n_cut)
+            self.check_strange_n(n_crit=self.n_crit)
+
+        ## If not --> Manual check
+        else:
+            try: self.check_bound()
+            except: pass
+        self.safe_itemlist=self.Data.clean_data(self.galfit_itemlist)
+
+
+    def check_bound(self, runlist=None):
+
+        """
+        Descr - Check parameter at the limit
+        INPUT
+         ** runlist : Automatically get limits (default : None)
+        """
+        self.bound=np.copy(self.Data.val)
+        self.bound.fill(0)
+        if(self.silent==False):
+            print("\n◯ Check bound")
+            if(hasattr(runlist, "__len__")): print(">>>> Runlist exists")
+            else: print(">>>> Runlist does not exist")
+
+        using_itemlist=np.copy(self.galfit_itemlist)
+        mag_pos=np.where(np.char.find(using_itemlist, 'MAG')>0)[0]
+        using_itemlist=using_itemlist[np.isin(np.arange(len(using_itemlist)), mag_pos, invert=True)]
+
+        x_pos=np.where(np.char.find(using_itemlist, 'XC')>0)[0]
+        y_pos=np.where(np.char.find(using_itemlist, 'YC')>0)[0]
+
+        value_data=dharray.array_flexible_to_simple(self.Data.val[using_itemlist])
+        pos_pos=np.append(x_pos, y_pos) #Center position
+        for i_run in range(len(runlist)):
+
+            thislim=copy.deepcopy(runlist['lim_params'][i_run])
+            thislim[:,3]+=self.re_cut ## Add manual cut
+            thislim=np.vstack(thislim)
+            #this_pos_pos=pos_pos[pos_pos<len(thislim)]  # cut higher components
+            #(e.g,) Total galfit_itemlist is up to 3rd comp. but this run has only 2nd comp.
+            #thislim[this_pos_pos]+=100 # Center position
+
+            thisvals=value_data[i_run][:len(thislim)] # cut higher components
+            boundlist=np.where((thisvals<=thislim[:,0]) | (thisvals>=thislim[:,1]))[0]
+
+            if(len(boundlist)!=0):
+                boundlist=np.array(using_itemlist)[boundlist]
+                self.bound[boundlist][i_run]=2
+
+        ## Whether use constraint or not
+        if(hasattr(runlist, "__len__")):
+            removelist=np.where(runlist['use_lim']==0)
+            self.bound[removelist]=0
+
+        self.Data.war=dharray.array_quickname(dharray.array_flexible_to_simple(self.Data.war)
+                                      + dharray.array_flexible_to_simple(self.bound),
+                                      names=self.Data.war.dtype.names, dtypes=self.Data.war.dtype)
+
+
+    def check_strange_radius(self, snr_crit=1, reff_snr_n_cut=1e9):
+
+        """
+        Descr - Check Reff by comparing uncertainty
+        INPUT
+         ** runlist : Automatically get limits (default : None)
+        """
+        if(snr_crit==None):
+            self.Data.reff_strange=np.full(len(self.Data.val), False)
+            self.Data.reff_snr=np.full(len(self.Data.val), np.nan)
+            return
+        if(self.silent==False):
+            print("\n◯ Check Reff")
+
+        using_itemlist=np.copy(self.galfit_itemlist)
+        n_pos=np.where(np.char.find(using_itemlist, 'N')>0)[0]
+        cut_using_itemlist=using_itemlist[n_pos]
+        n_data=dharray.array_flexible_to_simple(self.Data.val[cut_using_itemlist]) ## n val
+
+        reff_pos=np.where(np.char.find(using_itemlist, 'RE')>0)[0]
+        cut_using_itemlist=using_itemlist[reff_pos]
+
+        value_data=dharray.array_flexible_to_simple(self.Data.val[cut_using_itemlist]) ## Reff val
+        error_data=dharray.array_flexible_to_simple(self.Data.err[cut_using_itemlist]) ## Reff err
+
+
+        with np.errstate(divide='ignore'):
+            self.Data.reff_snr=value_data/error_data # SNR
+        with warnings.catch_warnings():  ## Ignore warning. Nan warning is natural in this case.
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            usingdat=copy.deepcopy(self.Data.reff_snr)
+            usingdat[np.isnan(error_data) & np.isfinite(value_data)]=0   # It has the value, but error is inf.
+            usingdat[n_data>reff_snr_n_cut]=np.nan ## sersic index higher than the given value -> not apply SNR cut
+            for i in range (len(usingdat[0])): ## Loop for a component
+                self.Data.war[cut_using_itemlist[i]][usingdat[:,i]<snr_crit]+=100
+            sumarray=np.nanmin(usingdat, axis=1)
+
+
+        self.Data.reff_strange=(sumarray<snr_crit) # Lower than the criteria
+        self.Data.reff_nan=np.isnan(error_data) & np.isfinite(value_data) # It has the value, but error is inf.
+        self.Data.reff_nan=np.sum(self.Data.reff_nan, axis=1)
+        self.Data.reff_strange[self.Data.reff_nan!=0]=True
+        # above: We want to avoid PSF only data (no Re) being catagorized as an error
+        # cf) np.isnan(sumarray) --> PSF is now reff_strange
+
+    def check_strange_n(self, n_crit=2):
+        """
+        Descr - Check specific value of n
+        INPUT
+         ** runlist : Automatically get limits (default : None)
+        """
+        if(n_crit==None):
+            self.Data.n_strange=np.full(len(self.Data.val), False)
+            return
+
+        using_itemlist=np.copy(self.galfit_itemlist)
+        n_pos=np.where(np.char.find(using_itemlist, 'N')>0)[0]
+        cut_using_itemlist=using_itemlist[n_pos]  ##"2_N", "3_N", "4_N", ...
+        n_data=dharray.array_flexible_to_simple(self.Data.val[cut_using_itemlist]) ## n val (array)
+        model_ss = (np.isfinite(n_data[:,0]) & np.isfinite(n_data[:,1])) ## Only SS (& SS+PSF)model
+        n_strange_raw=(n_data==n_crit)
+        self.Data.n_strange=(np.sum(n_strange_raw, axis=1).astype(bool) & model_ss)
+
+        for i in range (len(n_strange_raw[0])):
+            # target=(n_strange_raw[:,i]==True)
+            target=((n_strange_raw[:,i]==True) & model_ss)
+            self.Data.war[cut_using_itemlist[0]][target]+=100
+
+
+
+    def find_best(self, remove_warn=True, comp_crit=None):
+        if(self.silent==False): print("\n● Find the best submodel")
+        if(comp_crit==None): comp_crit=self.comp_crit
+        chi2list=self.Data.val[comp_crit]
+        usingindex=np.arange(len(chi2list))
+        if(remove_warn==True):
+            if(self.silent==False): print(">> Without warning")
+            usingindex=usingindex[(self.Data.war_tot==0)
+                                   & (self.Data.reff_strange==False)
+                                   & (self.Data.n_strange==False)]
+            ## If no results
+            if(len(usingindex)==0):
+                if(self.silent==False): print(">> No results. Finding the best regardless of the warning")
+                return self.find_best(remove_warn=False)
+            ## If All data is NaN
+            checknan=np.sum(np.isnan(chi2list[usingindex]))
+            if(checknan==len(usingindex)):
+                if(self.silent==False): print(">> No results. Finding the best regardless of the warning")
+                return self.find_best(remove_warn=False)
+        else:
+            ## Reff_Strange filter
+            good_data=usingindex[(self.Data.reff_strange==False)
+                                 & (self.Data.n_strange==False)
+                                 & np.isfinite(chi2list[usingindex])]
+            ## If no results
+            if(len(good_data)==0):
+                if(self.silent==False): print(">> All data is ruled out by the Reff SNR criterion.")
+                pass
+            else: usingindex=usingindex[(self.Data.reff_strange==False) & (self.Data.n_strange==False)]
+
+        min_chi=np.nanmin(chi2list[usingindex])
+        minpos=np.where(chi2list[usingindex]==min_chi)[0]
+        return usingindex[minpos]
+
+    def find_near_best(self, min_chi, tolerance=0, comp_crit='RChi_50'):
+        chi2list=self.Data.val[comp_crit]
+        if(hasattr(min_chi, "__len__")): min_chi=np.nanmin(min_chi)
+        self.chi2_diff=np.abs(chi2list-min_chi)/min_chi
+        nearpos=np.where(self.chi2_diff<tolerance)[0] ## Fraction
+        return nearpos
+
+    def save_data(self, fna_output='saved_resgal.dat', fn_output='', return_array=False):
+        if(fna_output==None): fn_output=None
+        elif(fn_output==''): fn_output=self.dir_work_galfit+fna_output
+        if(self.silent==False): print("\n● Save the result : ", fn_output)
+        return self.Data.save_data(fn_output=fn_output, add_header=self.dir_work_galfit, return_array=return_array)
+
+    ##========================== Show data & display ============================
+    def show_data(self, only_val=False, hide_nan=True, hide_PA=True, hide_fail_read=True):
+        if(np.sum(self.Data.is_file_exist)==0):
+            print(">> No data!")
+            return
+        if(hide_nan==True): newitemlist=self.safe_itemlist
+        else: newitemlist=np.array(self.itemlist) ## All the items
+        if(hide_PA==True):
+            drop=np.where((newitemlist=='2_AR') | (newitemlist=='2_PA')
+            | (newitemlist=='3_AR') | (newitemlist=='3_PA'))
+            newitemlist=np.delete(newitemlist, drop)
+
+        newitemlist=np.append(['group_ID', 'is_swap'], newitemlist)
+        if(hide_fail_read==True): newfilelist=self.Data.is_file_exist
+        else: newfilelist=np.full(len(self.Data.is_file_exist), True) ## All the files
+        errorlist=self.Data.namelist[self.Data.war_tot.astype(bool)]
+        lowsnrlist=self.Data.namelist[self.Data.reff_strange.astype(bool) | self.Data.n_strange.astype(bool)]
+
+        newitemlist_chi2=np.append(newitemlist, self.chi2_itemlist)
+        self.df_display(self.Data.val[newfilelist][newitemlist_chi2], newfilelist, errorlist, lowsnrlist, caption='Values')
+
+        if(only_val==False):
+            self.df_display(self.Data.err[newfilelist][newitemlist], newfilelist, errorlist, lowsnrlist, caption='Error')
+            self.df_display(self.Data.war[newfilelist][newitemlist], newfilelist, errorlist, lowsnrlist, caption='Warning', is_limit_format=True)
+
+    def df_display(self, data, newfilelist, errorlist, lowsnrlist, caption='datatype', is_limit_format=False):
+        df=pd.DataFrame(data, index=self.Data.namelist[newfilelist])
+        if(is_limit_format==True): formatting='{:.0f}'
+        else: formatting='{:f}'
+        df=df.style.apply(lambda x: ['background: lightyellow' if x.name in self.Data.namelist[self.best_near]
+                                      else '' for i in x],
+                           axis=1)\
+            .apply(lambda x: ['background: bisque' if x.name in self.Data.namelist[self.best_warn]
+                              else '' for i in x],
+                   axis=1)\
+            .apply(lambda x: ['background: lightgreen' if x.name in self.Data.namelist[self.best]
+                                      else '' for i in x],
+                           axis=1)\
+            .apply(lambda x: ['color: red' if x.name in errorlist
+                          else '' for i in x],
+               axis=1)\
+            .apply(lambda x: ['font-style: italic; font-weight:bold' if x.name in lowsnrlist
+                          else '' for i in x],
+               axis=1)\
+            .format(formatting)\
+            .set_caption(caption).set_table_styles([{
+            'selector': 'caption',
+            'props': [
+                ('color', 'red'),
+                ('font-size', '16px')
+            ]
+        }])
+        display(df)
+
+    def make_swaplist(self, mode='RE'):
+        if(mode=='RE'):
+            return np.where(self.Data.val['2_RE']<self.Data.val['3_RE'])[0] # Larger Re
+        elif(mode=='N'):
+            return np.where(self.Data.val['3_N']<self.Data.val['2_N'])[0] #Lower N
+        elif(mode=='MU'):
+            swaplist=np.zeros(len(self.Data.val), dtype=bool)
+            for i in range (len(self.Data.val)):
+                if(np.isnan(self.Data.val[i]['3_N'])): continue
+                s2=Sersic1D(amplitude=mu2pix(self.Data.val[i]['2_MU_E'], plate_scale=self.plate_scale, zeromag=self.zeromag),
+                                            r_eff=self.Data.val[i]['2_RE'], n=self.Data.val[i]['2_N'])
+                s3=Sersic1D(amplitude=mu2pix(self.Data.val[i]['3_MU_E'], plate_scale=self.plate_scale, zeromag=self.zeromag),
+                            r_eff=self.Data.val[i]['3_RE'], n=self.Data.val[i]['3_N'])
+                re=np.nanmax([self.Data.val[i]['2_RE'], self.Data.val[i]['3_RE']])
+                swaplist[i]=(s2(re)<s3(re))  #Outer region -> brighter
+            return np.where(swaplist==True)
+        elif(mode=='2MU'):
+            swaplist=np.zeros(len(self.Data.val), dtype=bool)
+            for i in range (len(self.Data.val)):
+                if(np.isnan(self.Data.val[i]['3_N'])): continue
+                s2=Sersic1D(amplitude=mu2pix(self.Data.val[i]['2_MU_E'], plate_scale=self.plate_scale, zeromag=self.zeromag),
+                            r_eff=self.Data.val[i]['2_RE'], n=self.Data.val[i]['2_N'])
+                s3=Sersic1D(amplitude=mu2pix(self.Data.val[i]['3_MU_E'], plate_scale=self.plate_scale, zeromag=self.zeromag),
+                            r_eff=self.Data.val[i]['3_RE'], n=self.Data.val[i]['3_N'])
+                re=2*np.nanmax([self.Data.val[i]['2_RE'], self.Data.val[i]['3_RE']])
+                swaplist[i]=(s2(re)<s3(re))  #Outer region -> brighter
+            return np.where(swaplist==True)
+        elif(mode=='3MU'):
+            swaplist=np.zeros(len(self.Data.val), dtype=bool)
+            for i in range (len(self.Data.val)):
+                if(np.isnan(self.Data.val[i]['3_N'])): continue
+                s2=Sersic1D(amplitude=mu2pix(self.Data.val[i]['2_MU_E'], plate_scale=self.plate_scale, zeromag=self.zeromag),
+                            r_eff=self.Data.val[i]['2_RE'], n=self.Data.val[i]['2_N'])
+                s3=Sersic1D(amplitude=mu2pix(self.Data.val[i]['3_MU_E'], plate_scale=self.plate_scale, zeromag=self.zeromag),
+                            r_eff=self.Data.val[i]['3_RE'], n=self.Data.val[i]['3_N'])
+                re=3*np.nanmax([self.Data.val[i]['2_RE'], self.Data.val[i]['3_RE']])
+                swaplist[i]=(s2(re)<s3(re))  #Outer region -> brighter
+            return np.where(swaplist==True)
+
+
+class Chi2Update():
+    """
+    Descr - Calculate chi2 and update Galfit fits
+    ** Input files in the list should share the same simga & masking images
+    ** See cal_chi2()
+    INPUT
+     - fnlist : file list (those share the same sigma & masking files)
+     - fn_sigma : Sigma file (A signle file for all files in fnlist).
+                  If None : The code will make a flat image
+     * fn_masking : Masking file (A single file for all files in fnlist).
+                    If None : Do not mask
+     * radius : The region for calculating chi2 (Radius)
+                     If -1, calculate for all region (default = -1)
+     * image_size : Size of images (default = 200)
+     * repair_fits : Repair the Galfit header if it has problem (Default : True)
+     * chi_item_name : Input chi2 name as a new header. (default : 'F')
+       ** 'Chi_'+'chi_item_name' will be added for the chi2 value
+       ** 'RChi_'+'chi_item_name' will be added for the reduced chi2 value
+       ** 'NDOF_'+'chi_item_name' will be added for the number of DOF
+       ** 'LIK_'+'chi_item_name' will be added for the likehood value
+     * fn_base_noext : Base Path when the input file does not have extensions
+       ** In this case, image file will be loaded from 'fn_base_noext' + header['DATAIN']
+     * Overwrite : (default : False)
+    """
+    def __init__(self,
+                 MC2fitSettingClass,
+                 fnlist,
+                 fn_sigma,
+                 fn_masking=None,
+                 **kwargs):
+
+
+        self.fnlist=fnlist
+        self.fn_sigma=fn_sigma
+        self.fn_masking=fn_masking
+        self.repair_fits=True
+        self.image_size=200
+        self.chi2_radius_list=[-1, 50]
+        self.chi_item_namelist=['F', '50']
+        self.fn_base_noext=''
+        self.overwrite=False,
+        self.silent=True
+
+        try: self.__dict__.update(MC2fitSettingClass.__dict__)
+        except: pass
+        self.__dict__.update(kwargs)
+        self._post_init()
+
+
+    def _post_init(self):
+        self.image_size=dharray.value_repeat_array(self.image_size, 2)
+        self._get_data()
+        for fn in self.fnlist:
+            self._main_work(fn)
+
+    def _get_data(self):
+        ## Multi-radius
+        if(hasattr(self.chi2_radius_list, "__len__")):
+            self.Nseq=len(self.chi2_radius_list)
+        else:
+            self.chi2_radius_list=np.array([self.chi2_radius_list])
+            self.Nseq=1
+
+        if(self.silent==False): print("Radius", self.chi2_radius_list)
+        self.chi_item_namelist=dharray.repeat_except_array(self.chi_item_namelist, self.Nseq)
+
+        ## Input sigma
+        if(self.fn_sigma==None): # If no sigma -> Make a flat image
+            self.sig=np.full((self.image_size), 1)
+        else: self.sig=fits.getdata(self.fn_sigma)
+
+        ## Input masking
+        if(self.fn_masking==None): self.mask=None
+        else: self.mask=fits.getdata(self.fn_masking)
+
+    def _main_work(self, fn):
+        ## File read
+        try:
+            GDat=dhmc2fit.ReadGalfitData(fn, fn_base_noext=self.fn_base_noext, repair_fits=self.repair_fits)
+        except:
+            if(self.silent==False): print(">> Cannot read the file:", fn)
+            return
+
+        ## Check previous work
+        if(self.overwrite==False):
+            try:  # Header exists --> Next file
+                GDat.header['LIK_'+self.chi_item_namelist]
+                return
+            except: # Do work!
+                pass
+
+
+        if(GDat.Next>2): ext_save=2
+        else: ext_save=0
+
+        ## ============= Save Log =============
+        fits.setval(fn, 'postpro', value="============== Post Processing ==============", after='LOGFILE', ext=ext_save)
+        fits.setval(fn, 'pfn_sig', value=self.fn_sigma, after='postpro', ext=ext_save)
+        fits.setval(fn, 'pfn_mask', value=self.fn_masking, after='pfn_sig', ext=ext_save)
+
+        ## ============= Save results =======================
+        for seq in range (self.Nseq):
+            fits.setval(fn, 'Field'+self.chi_item_namelist[seq], value="--"*20, ext=ext_save)
+
+            ## Main calc
+            chi2, Npixel=cal_chi2(GDat.resi, self.sig, self.mask, self.chi2_radius_list[seq])
+
+            if(Npixel<=0): chi2=1e7-1
+            if(np.isinf(chi2)): chi2=1e7-1
+            fits.setval(fn, 'Chi_'+self.chi_item_namelist[seq], value=chi2, ext=ext_save)
+
+            p=GDat.header['NFREE']
+            ndof=Npixel-p
+            fits.setval(fn, 'NDOF_'+self.chi_item_namelist[seq], value=ndof, ext=ext_save)
+
+            if((ndof>10) & (np.isfinite(chi2))):
+                fits.setval(fn, 'RChi_'+self.chi_item_namelist[seq], value=chi2/ndof, ext=ext_save)
+                aic=chi2+2*p+(2*p*(p+1))/(Npixel-p-1)
+                fits.setval(fn, 'AIC_'+self.chi_item_namelist[seq], value=aic, ext=ext_save)
+                # https://stats.libretexts.org/Bookshelves/Introductory_Statistics/Statistics_with_Technology_2e_(Kozak)/11%3A_Chi-Square_and_ANOVA_Tests/11.02%3A_Chi-Square_Goodness_of_Fit
+                likelihood=1-stats.chi2.cdf(chi2, ndof)
+                fits.setval(fn, 'LIK_'+self.chi_item_namelist[seq], value=likelihood, ext=ext_save)
+
+            else:
+                fits.setval(fn, 'RChi_'+self.chi_item_namelist[seq], value=1e7-1, ext=ext_save)
+                fits.setval(fn, 'AIC_'+self.chi_item_namelist[seq], value=1e7-1, ext=ext_save)
+                fits.setval(fn, 'LIK_'+self.chi_item_namelist[seq], value=-(1e7-1), ext=ext_save)
+
+        if(self.silent==False): print(">>", fn, "Done")
+
+def cal_chi2(dat, sig, mask=None, radius=-1):
+    """
+    Descr - calculate chi2 (See also. cal_update_chi2)
+    INPUT
+     - dat : data array
+     - sig : sigma array
+     * mask : masking array. It will mask all pixels having non-zero. If None, do not mask. (Default : None)
+     * radius : The region for calculating chi2 (Radius)
+                     If -1, calculate for all region (default : -1)
+    """
+    if(hasattr(mask, "__len__")): mask=mask.astype(bool)
+    mdat=np.ma.masked_array(dat, mask)
+    if(radius<0): innerpart=np.where(mdat.mask==False) #return np.sum((mdat**2/sig**2)),
+    else:
+        center=int(len(dat)/2)
+        radius=int(radius)
+        mx, my=np.mgrid[0:len(dat),0:len(dat)]
+        innerpart=np.where(((mx-center)**2 + (my-center)**2 <= radius**2) & (mdat.mask==False))
+        if(len(innerpart[0])==0): return 0,0
+
+    try: return np.sum((mdat[innerpart]**2/sig[innerpart]**2)), len(innerpart[0])
+    except: return np.nan,0
+
+
 class MC2fitPostProcessing():
     """
 
