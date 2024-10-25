@@ -1,6 +1,7 @@
 import DH_array as dharray
 import DH_path as dhpath
 import DH_MC2fit_sub as dhmc2fitsub
+import DH_multicore as mulcore
 
 import numpy as np
 import os
@@ -26,6 +27,902 @@ from scipy.special import gamma, gammainc, gammaincinv ## Sersic post processing
 import subprocess
 from multiprocessing import Pool
 import warnings
+
+@dataclass
+class MC2fitSetting:
+    """
+    Setting for MC2fit
+
+    ## Path
+        proj_folder:    str = 'galfit_g_base/' ## Galfit results will be saved here
+        fn_galfit:      str = dhpath.fn_galfit() ## Galfit program path
+        fni_image:      str = 'image_g.fits' ## input image
+        fni_psf:        str = 'psf_g.fits' ## PSF image
+        fni_masking:    str = 'masking_c_d.fits' ## combined masking file
+        fni_sigma:      str = 'sigma_g.fits' ## No sigma image
+        is_run_galfit_dir_work: bool = False ## If true, run GALFIT in each working directory. Use True if you want to extract sigma.fits
+
+    ## Info
+        band:           str = 'g'
+        est_sky:        float = 0 ## estimated sky value [ADU]
+        zeromag:        float = 22.5 ## Photometric zeropoint MAG=-2.5*log(data)+zeromag
+        plate_scale:    float = 0.2 ## Input float or array (dx, dy). [arcsec / pix]
+        image_size:     int = 500 ## Input int or array (x, y). [pixel]
+
+    ## Run option
+        Ncore:          int = 16 ## Multi-core processing
+        fast_skip:      bool = False ## Skip running GALFIT if result files already exist
+        overwrite:      bool = True  ## Overwrite the result
+        remove_galfit_interval: float = 30 ## Remove GALFIT log files when the number of files reaches the given value.
+        debug:          bool = False ## Print internal messages, use debug mode
+        use_try:        bool = True ## Skip all error message
+        extract_sigma:  bool = False ## Extract internal Sigma image from GALFIT (sigma.fits)
+
+    ## Print Output
+        show_progress:  float = -1 ## Interval for printing the progress. -1 to hide
+        silent:         bool = True ## Print internal messages
+
+    """
+    ## Path
+    proj_folder:    str = 'galfit_g_base/' ## Galfit results will be saved here
+    fn_galfit:      str = dhpath.fn_galfit() ## Galfit program path
+    fni_image:      str = 'image_g.fits' ## input image
+    fni_psf:        str = 'psf_g.fits' ## PSF image
+    fni_masking:    str = 'masking_c_d.fits' ## combined masking file
+    fni_sigma:      str = 'sigma_g.fits' ## No sigma image
+    is_run_galfit_dir_work: bool = False ## If true, run GALFIT in each working directory. Use True if you want to extract sigma.fits
+
+    ## Info
+    band:           str = 'g'
+    est_sky:        float = 0 ## estimated sky value [ADU]
+    zeromag:        float = 22.5 ## Photometric zeropoint MAG=-2.5*log(data)+zeromag
+    plate_scale:    float = 0.2 ## Input float or array (dx, dy). [arcsec / pix]
+    image_size:     int = 500 ## Input int or array (x, y). [pixel]
+
+    ## Run option
+    Ncore:          int = 16 ## Multi-core processing
+    fast_skip:      bool = False ## Skip running GALFIT if result files already exist
+    overwrite:      bool = True  ## Overwrite the result
+    remove_galfit_interval: float = 30 ## Remove GALFIT log files when the number of files reaches the given value.
+    debug:          bool = False ## Print internal messages, use debug mode
+    use_try:        bool = True ## Skip all error message
+    extract_sigma:  bool = False ## Extract internal Sigma image from GALFIT (sigma.fits). Set is_run_galfit_dir_work as True
+    output_block:   bool = True ## Extract the output file. If False, it does not run Galfit
+
+    ## Print Output
+    show_progress:  float = -1 ## Interval for printing the progress. -1 to hide
+    silent:         bool = True ## Print internal messages
+#     np.ndarray = field(default_factory=lambda:
+#                                   np.array(['sersic2', 'sersic2'])) # list of components (Ncomp = len(components))
+
+    def __post_init__(self):
+        self.plate_scale=dharray.value_repeat_array(self.plate_scale, 2)
+        self.image_size=dharray.value_repeat_array(self.image_size, 2)
+        if(self.proj_folder[-1]!='/'): self.proj_folder=self.proj_folder+"/" ## For directory format
+        print("Setting completed")
+
+class MC2fitRunlist():
+    """
+    Descr - Runlist
+    INPUT
+     * complist : array_like (Default = np.array(['sersic2', 'sersic2']))
+        List of components (Ncomp = len(components))
+     * namelist : array_like (Default=np.array(['ss_23', 'ss_24', 'ss_25', 'ss_26']))
+        Namelist (Nset = len(namelist))
+     * est_params_array: Ndarray - object (Ncomp * 7)
+        (Default: np.array([[np.nan, np.nan, np.array([23, 24, 25, 26]), 30, 1, 1, 0],
+        [np.nan, np.nan, np.array([23, 24, 25, 26]), 10, 4, 1, 0]],
+        dtype=object) # See note)
+        ** The list of estimated parameters for compoments.
+                        These values are initial guesses for Galfit.
+                        The single value in the list will be copied.
+                        For values of nan, they will be converted to default values.
+                  index    [  0   |  1   | 2 |  3 | 4 |5 |6 ]
+                  params   [ xpos | ypos |mag|reff| n |ar|pa]
+                  default  [center|center|20 | 20 | 4 |1 |0 ]
+         ** for values of np.nan --> It will be converted into default values (See class AutoGalfit)
+     * lim_pos, lim_mag, lim_reff, lim_n, lim_ar, lim_pa: Ndarray (Ncomp * 2)  or list (,2)
+        Constraints (min and max values)
+        ** for values of np.nan --> Galfit will not use the constraint for the parameter
+        ** e.g., [[0, 2], [0.1, 5]]  or [0,2]
+        ** You can use lim_params_array
+     * lim_params_array: Ndarray (self.Ncomp, self.Nparam, 2) (Default: None)
+        Constraints table.
+        ** If None, it will be automatically generated based on lim_pos, lim_mag ...
+     * use_constraint: Bool (Default: True)
+        Whether use the constraint or not.
+        The single value in the list will be duplicated.
+     * group_id: int (default: -1)
+        Set the group ID
+     * size_conv, size_fitting: int (default: -1, -1)
+        Galfit parameters
+
+    """
+    def __init__(self,
+                 MC2fitSettingClass,
+                 **kwargs):
+
+        ## default setting
+        self.complist = np.array(['sersic2', 'sersic2'])  # list of components (Ncomp = len(components))
+        self.namelist = np.array(['ss_23', 'ss_24', 'ss_25', 'ss_26'])   # Namelist (Nset = len(namelist))
+
+        ## Initial guess
+              # Nan -> Default
+        self.est_params_array = np.array([[np.nan, np.nan, np.array([23, 24, 25, 26]), 30, 1, 1, 0],
+                                          [np.nan, np.nan, np.array([23, 24, 25, 26]), 10, 4, 1, 0]],
+                                          dtype=object) # See note
+
+        self.use_constraint = True ## We will use constraints
+
+        self.lim_pos = np.array([[80, 120]]) # position constraint
+        self.lim_mag = np.nan # magnitude constraint
+        self.lim_reff = np.array([[5, 200]]) # Effective radius constraint
+        self.lim_n = np.array([[0.2, 2]]) # sersic index (n) constraint
+        self.lim_ar = np.array([[0.1, 1]])
+        self.lim_pa = np.nan
+        self.lim_params_array = None ## Instead of above, you can put in the values at once.
+
+        self.group_id = 0   ## Fitting group
+        self.size_conv = 101  ## Convolution box size
+        self.size_fitting = -1
+
+
+        try: self.__dict__.update(MC2fitSettingClass.__dict__)
+        except: pass
+        self.__dict__.update(kwargs)
+        self._post_init()
+
+
+    def _post_init(self):
+        self.plate_scale=dharray.value_repeat_array(self.plate_scale, 2)
+        self.image_size=dharray.value_repeat_array(self.image_size, 2)
+        self.size_fitting=dharray.value_repeat_array(self.size_fitting, 2)
+        self.size_conv=dharray.value_repeat_array(self.size_conv, 2)
+
+        if(type(self.complist)==str): print("Error! complist is not array type!")
+        if(type(self.namelist)==str): print("Error! namelist is not array type!")
+        self.Ncomp = len(self.complist)
+        self.Nset = len(self.namelist)
+        self.Nparam = len(self.est_params_array[0])
+        self._setup_params_table()
+        self._generate_runlist()
+
+    def _setup_params_table(self):
+        """
+        Repeat est_params --> Generate table
+        Skip for arrays
+        est_params_table: Nset * Ncomp * params
+        """
+        self.est_params_table=np.full((self.Nset, self.Ncomp, self.Nparam), np.nan)
+        for comp in range (self.Ncomp):
+            for i in range(self.Nparam):
+                self.est_params_table[:,comp,i]=dharray.repeat_except_array(self.est_params_array[comp,i], self.Nset)
+        self.use_constraint_list=dharray.repeat_except_array(self.use_constraint, self.Nset)
+
+        # All sets will share the same constraints
+        # Ncomp * params
+        if(hasattr(self.lim_params_array, "__len__")==False):
+            self.lim_params_array=np.full((self.Ncomp, self.Nparam, 2), np.nan)
+            self.lim_params_array[:,0]=self.value2array(self.lim_pos, self.Ncomp)
+            self.lim_params_array[:,1]=np.copy(self.lim_params_array[:,0])
+            self.lim_params_array[:,2]=self.value2array(self.lim_mag, self.Ncomp)
+            self.lim_params_array[:,3]=self.value2array(self.lim_reff, self.Ncomp)
+            self.lim_params_array[:,4]=self.value2array(self.lim_n, self.Ncomp)
+            self.lim_params_array[:,5]=self.value2array(self.lim_ar, self.Ncomp)
+            self.lim_params_array[:,6]=self.value2array(self.lim_pa, self.Ncomp)
+
+        # Nset * Ncomp * params
+        self.lim_params_table = np.repeat(self.lim_params_array[None,:,:], self.Nset, axis=0)
+
+    def value2array(self, value, repeat):
+        """
+        Value -> array by repeating
+        """
+        if(hasattr(value, "__len__")): #e.g., [[1,2], [3,4]]
+            for i in range (len(value)):
+                if(hasattr(value[i], "__len__")==False): value[i]=[np.nan, np.nan]  #e.g., [[1,2], np.nan]
+            if(len(value)==1): return np.repeat(value, repeat, axis=0)
+            elif(len(value)>repeat): return np.array(value[:repeat])
+            elif(len(value)<repeat): print("Error! Size is not enough!")
+            else: return np.array(value)
+        else: return np.repeat([[np.nan, np.nan]], repeat, axis=0)  #np.nan
+
+    def _generate_runlist(self):
+        """
+        Make runlist
+        """
+        ## Generate array
+        runlist_dtype=[('name', '<U20'),('complist', object), ('ncomp', '<i4'),
+                       ('est_params', object), ('lim_params', object),
+                       ('size_conv', object), ('size_fitting', object),
+                       ('group_ID', '<i4'), ('use_lim', bool),
+                      ]
+        self.runlist=np.zeros(self.Nset, dtype=runlist_dtype)
+
+        ## Input values
+        for i in range(self.Nset):
+            self.runlist['est_params'][i]=self.est_params_table[i]
+            self.runlist['lim_params'][i]=self.lim_params_table[i]
+            self.runlist['complist'][i]=self.complist
+            self.runlist['ncomp'][i]=len(self.complist)
+            self.runlist['size_conv'][i]=self.size_conv
+            self.runlist['size_fitting'][i]=self.size_fitting
+        self.runlist['name']=self.namelist
+        self.runlist['use_lim']=self.use_constraint_list
+        self.runlist['group_ID'] = self.group_id
+
+    def add_runlist(self, add_runlist):
+        self.runlist=np.append(self.runlist, add_runlist.runlist)
+        self.namelist=self.runlist['name']
+
+    def show_runlist(self, show_lim=True):
+        """
+        Display runlist
+        """
+        Nset_imsi=len(self.runlist['est_params'])
+        dum, Nparams_imsi=np.shape(self.runlist['est_params'][0])
+
+        ## Front | est | (lim) | End
+        runlist_show_front=self.runlist[['name', 'complist', 'ncomp']]
+        runlist_show_front=dharray.array_remove_void(runlist_show_front)
+        runlist_show_end=self.runlist[['use_lim', 'group_ID']]
+        runlist_show_end=dharray.array_remove_void(runlist_show_end)
+
+        ## Make names
+        params_list=['xpos', 'ypos', 'mag', 'reff', 'n', 'ar', 'pa']
+        params_list_est=dharray.array_attach_string(params_list, 'est_', add_at_head=True)
+        params_list_lim=dharray.array_attach_string(params_list, 'lim_', add_at_head=True)
+
+        ## Make est_list, lim_list
+        runlist_show_estlist=np.zeros((Nset_imsi, Nparams_imsi), dtype=object) # Ncomp : already merged into
+        runlist_show_limlist=np.zeros((Nset_imsi, Nparams_imsi), dtype=object) # Ncomp : already merged into
+        for i in range (Nset_imsi):
+            runlist_show_estlist[i]=np.apply_along_axis(', '.join, 0, self.runlist['est_params'][i].astype(str))
+            temp=np.apply_along_axis(' '.join, 2, self.runlist['lim_params'][i].astype(str)).astype(str).T
+            temp=np.char.add('(', temp.astype(str))
+            temp=np.char.add(temp.astype(str), ')')
+            runlist_show_limlist[i]=np.apply_along_axis(', '.join, 1, temp)
+
+        ## Add names
+        runlist_show_comp=dharray.array_quickname(runlist_show_estlist, names=params_list_est, dtypes=object)
+        runlist_show_lim=dharray.array_quickname(runlist_show_limlist, names=params_list_lim, dtypes=object)
+
+        ## Merge
+        res=dharray.array_add_columns(runlist_show_front, runlist_show_comp)
+        if(show_lim): res=dharray.array_add_columns(res, runlist_show_lim)
+        res=dharray.array_add_columns(res, runlist_show_end)
+
+        display(pd.DataFrame(res))
+
+class PyGalfit():
+    """
+    Automatically run Galfit with input presets
+    See also -> Runlist_Galfit (Generate presets)
+    """
+    def __init__(self,
+                 MC2fitSettingClass,
+                 dir_work,
+                 **kwargs):
+
+        ## default setting
+        self.size_fitting = -1  # Fix the fitting area       ## -1 -> Full image
+        self.size_conv = -1     # Convolution size.             ## -1 --> Auto (size of the PSF image)
+        self.prefix=''
+        self.suffix=''
+        self.outputname='galfit'
+        self.is_run_galfit_dir_work=False
+        self.check_files=True
+        self.dir_work=dir_work
+        self.extract_sigma=False
+        self.psf_size=10
+
+
+        try: self.__dict__.update(MC2fitSettingClass.__dict__)
+        except: pass
+        self.__dict__.update(kwargs)
+        self._post_init()
+
+
+    def _post_init(self):
+        self.plate_scale=dharray.value_repeat_array(self.plate_scale, 2)
+        self.image_size=dharray.value_repeat_array(self.image_size, 2)
+        self.size_fitting=dharray.value_repeat_array(self.size_fitting, 2)
+        self.size_conv=dharray.value_repeat_array(self.size_conv, 2)
+        self.default_est_params=np.array([self.image_size[0]/2, self.image_size[1]/2, 20, 20, 4, 1, 0])
+
+        self.n_comp=int(0)
+        self.comp_dtype=[('fitting_type', '<U10'),
+                         ('est_xpos', '<f8'), ('est_ypos', '<f8'),
+                         ('est_mag', '<f8'), ('est_reff', '<f8'), ('est_n', '<f8'),
+                         ('est_axisratio', '<f8'), ('est_pa', '<f8')]
+
+        #Filenames
+        self._set_path_name(self.check_files)
+        self.generate_galconfig()
+        self.generate_constraints()
+
+    def _set_path_name(self, check_files=False):
+        if(self.is_run_galfit_dir_work): adding_dir_work='' ## Run Galfit in each folder
+        else: adding_dir_work=self.dir_work                 ## Run Galfit in a specific folder
+        os.makedirs(self.dir_work+self.proj_folder, exist_ok=True)
+
+        ## Configuration file
+            # fn : file name
+            # fnc: file name in the configuration file (galfit running folder)
+        self.fn_gal_conf = self.dir_work+self.proj_folder + 'param_' + self.prefix \
+                           + self.outputname+ self.suffix + ".dat"
+        self.fnc_gal_conf = adding_dir_work+self.proj_folder + 'param_' + self.prefix \
+                           + self.outputname+ self.suffix + ".dat"
+
+        ## We use a single constraint file
+            # fn : file name
+            # fnc: file name in the configuration file
+        self.fn_constraint = self.dir_work+self.proj_folder + 'const_' + self.prefix \
+                           + self.outputname+ self.suffix + ".dat"
+        self.fnc_constraint = adding_dir_work+self.proj_folder + 'const_' + self.prefix \
+                           + self.outputname+ self.suffix + ".dat"
+
+        ## Image
+        self.fn_image=self.dir_work+self.fni_image
+        self.fnc_image=adding_dir_work+self.fni_image
+        if(check_files):
+            try: fits.open(self.fn_image)
+            except: raise Exception(">> ♣♣♣ Warning! ♣♣♣ Image file does not exist! -"+str(self.fn_image))
+
+        ## PSF
+        self.fn_psf = self.dir_work + self.fni_psf
+        self.fnc_psf = adding_dir_work + self.fni_psf
+        if(check_files):
+            try: self.psf_size=np.shape(fits.getdata(self.fn_psf)) # Get PSF size
+            except: raise Exception(">> ♣♣♣ Warning! ♣♣♣ PSF file does not exist! -"+str(self.fn_psf))
+
+        ## Sigma
+        if((self.fni_sigma==None) | (self.fni_sigma=='none')):
+            self.fn_sigma = 'none'
+            self.fnc_sigma = 'none'
+        else:
+            self.fn_sigma = self.dir_work + self.fni_sigma
+            self.fnc_sigma = adding_dir_work + self.fni_sigma
+        if((check_files) & (self.fn_sigma!='none')):
+            try: fits.open(self.fn_sigma)
+            except: raise Exception(">> ♣♣♣ Warning! ♣♣♣ Sigma file does not exist! -"+str(self.fn_sigma))
+
+        ## Mask
+        if((self.fni_masking==None) | (self.fni_masking=='none')):
+            self.fn_masking = 'none'
+            self.fnc_masking = 'none'
+        else:
+            self.fn_masking = self.dir_work + self.fni_masking
+            self.fnc_masking = adding_dir_work + self.fni_masking
+        if(check_files):
+            try: fits.open(self.fn_masking)
+            except: raise Exception(">> ♣♣♣ Warning! ♣♣♣ Masking file does not exist! -"+str(self.fn_masking))
+
+        ## Output
+        self.fn_output_imgblock=self.dir_work+self.proj_folder+'output_'+ self.prefix + self.outputname + self.suffix + ".fits"
+        self.fnc_output_imgblock=adding_dir_work+self.proj_folder+'output_'+ self.prefix + self.outputname + self.suffix + ".fits"
+
+
+
+    def add_fitting_comp(self, fitting_type='sersic',
+                        est_params=np.full(7, np.nan), is_allow_vary=True, fix_psf_mag=False):
+        """
+        Descr - Add fitting component
+        INPUT
+         * fitting_type: (Default='sersic')
+         * est_params: Estimated parameters.
+                       For values nan, they will be default values.
+                 index    [  0   |  1   | 2 |  3 | 4 |5 |6 ]
+                 params   [ xpos | ypos |mag|reff| n |ar|pa]
+                 default  [center|center|20 | 20 | 4 |1 |0 ]
+
+         * is_allow_vary: If false, the value is fixed. Galfit will not change the parameter
+           1) True/False -> Apply the value for all parameters (Default=True)
+           2) Array -> Apply the values for each parameter
+                 index    [  0   |  1   | 2(X) |  3 | 4 |5 |6 ]
+                 params   [ xpos | ypos |mag(X)|reff| n |ar|pa]  ## Mag always changes (True)!
+        """
+
+        self.n_comp+=1
+        if(self.silent==False): print("● Added a fitting component ", self.n_comp)
+        index=int(self.n_comp-1)
+
+        ## Allow_vary_array
+        if(hasattr(is_allow_vary, "__len__")==False):
+            allow_vary_array=np.full(7, is_allow_vary)
+        else: allow_vary_array=is_allow_vary
+
+
+        ## Generate Array
+        if(self.n_comp==1): ## Make a new one
+            self.comp=np.zeros(self.n_comp, dtype=self.comp_dtype)
+        else: ## Attach a new row
+            temp_comparray=np.zeros(self.n_comp, dtype=self.comp_dtype)
+            temp_comparray[:-1]=np.copy(self.comp)
+            self.comp=np.copy(temp_comparray)
+
+
+        ## ========Est params Setting===========
+        ## default values
+        nans=np.isnan(est_params)
+        est_params[nans]=np.copy(self.default_est_params[nans])
+
+        ## setting
+        for i, item in enumerate(self.comp.dtype.names):
+            if(i==0): self.comp[index][item]=np.copy(fitting_type)
+            else: self.comp[index][item]=np.copy(est_params[i-1])
+
+        if(self.silent==False):
+            print(">> Input Data : ")
+            print(self.comp.dtype)
+            print(self.comp)
+
+        ## =============== INPUT values ==================
+        fconf = open(self.fn_gal_conf, 'a')
+        fconf.write('\n# Component number: %d\n'%int(self.n_comp+1))
+        fconf.write(' 0) %s                     #  object type\n'%fitting_type)
+        fconf.write(' 1) %f  %f   %d %d         #  position x, y\n'%(est_params[0], est_params[1], allow_vary_array[0], allow_vary_array[1]))
+        if(fitting_type=='psf'):
+            if(self.silent==False): print("PSF")
+            if(fix_psf_mag): fconf.write(' 3) %f      0              #  Total magnitude\n'  %est_params[2])
+            else: fconf.write(' 3) %f      1              #  Total magnitude\n'  %est_params[2])
+        else:
+            fconf.write(' 3) %f      1              #  Integrated magnitude (sersic2 - mu_Reff)\n'  %est_params[2])
+            fconf.write(' 4) %f      %d             #  R_e (half-light radius)   [pix]\n'  %(est_params[3], allow_vary_array[3]))
+            fconf.write(' 5) %f      %d             #  Sersic index n (exponential n=1)\n'  %(est_params[4], allow_vary_array[4]))
+            fconf.write(' 6) 0.0         0          #     -----\n')
+            fconf.write(' 7) 0.0         0          #     -----\n')
+            fconf.write(' 8) 0.0         0          #     -----\n')
+            fconf.write(' 9) %f      %d             #  axis ratio (b/a)\n' %(est_params[5], allow_vary_array[5]))
+            fconf.write('10) %f      %d             #  position angle (PA) [deg: Up=0, Left=90]\n'  %(est_params[6], allow_vary_array[6]))
+        fconf.write(' Z) 0                      #  output option (0 = resid., 1 = Do not subtract)\n')
+
+        fconf.close()
+
+
+
+
+    def generate_galconfig(self):
+        if(self.silent==False): print("● Generated config file to ", self.fn_gal_conf)
+
+        ## Conv size
+        if(self.size_conv[0]<=0): size_conv=self.psf_size
+
+        ## Fitting box
+        size_xmin, size_xmax = self.get_size(self.image_size[0], self.size_fitting[0])
+        size_ymin, size_ymax = self.get_size(self.image_size[1], self.size_fitting[1])
+
+
+        # Create name and open configuration file for writing
+        fconf = open(self.fn_gal_conf, 'w')
+        fconf.write('# Automatically generated by Auto_galfit.ipynb _ DJ Khim\n')
+        fconf.write('# IMAGE and GALFIT CONTROL PARAMETERS\n')
+
+        fconf.write('A) %s                     # Input data image (FITS file)\n' %self.fnc_image)
+        fconf.write('B) %s                     # Output data image block\n' %self.fnc_output_imgblock)
+        fconf.write('C) %s                   # Sigma image name (made from data if blank or "none")\n'%self.fnc_sigma)
+        fconf.write('D) %s                     # Input PSF image and (optional) diffusion kernel\n' %self.fnc_psf)
+        fconf.write('E) 1                      # PSF fine sampling factor relative to data\n')
+        fconf.write('F) %s                     # Bad pixel mask (FITS image or ASCII coord list)\n' %self.fnc_masking)
+        fconf.write('G) %s                     # File with parameter constraints (ASCII file)\n' %self.fnc_constraint)
+        fconf.write('H) %d    %d   %d    %d      # Image region to fit (xmin xmax ymin ymax)\n' %(size_xmin, size_xmax, size_ymin, size_ymax))
+        fconf.write('I) %d    %d               # Size of the convolution box (x y)\n'  %(self.size_conv[0], self.size_conv[1]))
+        fconf.write('J) %f                     # Magnitude photometric zeropoint\n' % self.zeromag)
+        fconf.write('K) %f    %f               # Plate scale (dx dy)  (arcsec per pixel)\n'  %(self.plate_scale[0], self.plate_scale[1]))
+        fconf.write('O) regular                # Display type (regular, curses, both\n')
+        fconf.write('P) 0                      # Choose: 0=optimize, 1=model, 2=imgblock, 3=subcomp\n\n')
+        fconf.write('# -----------------------------------------------------------------------------\n')
+        fconf.write('#   par)    par value(s)    fit toggle(s)    # parameter description \n')
+        fconf.write('# -----------------------------------------------------------------------------\n\n')
+
+        #========================= SKY ===================================
+        fconf.write('# Component number: 1\n')
+        fconf.write(' 0) sky                    #  object type\n')
+        fconf.write(' 1) %f      1              #  sky background at center of fitting region [ADUs]\n' %self.est_sky)
+        fconf.write(' 2) 0.0         0          #  dsky/dx (sky gradient in x)\n')
+        fconf.write(' 3) 0.0         0          #  dsky/dy (sky gradient in y)\n')
+        fconf.write(' Z) 0                      #  output option (0 = resid., 1 = Do not subtract)\n')
+
+        fconf.close()
+
+    def get_size(self, image_size, fitting_size):
+        if(fitting_size>=0):
+            half_size=np.around(fitting_size/2)
+            size_min=np.around(image_size/2-half_size)
+            size_max=np.around(image_size/2+half_size)
+            if(size_min<0): size_min=0
+            if(size_max>image_size): size_max=image_size
+        else:
+            size_min=0
+            size_max=image_size
+
+            return size_min, size_max
+
+
+    def generate_constraints(self):
+        if(self.silent==False): print("● Generated constraints file to ", self.fn_constraint)
+
+        # Create name and open configuration file for writing
+        fconf = open(self.fn_constraint, 'w')
+        fconf.write('# Automatically generated by Auto_galfit.ipynb _ DJ Khim\n')
+        fconf.write('# GALFIT CONSTRAINT PARAMETERS\n')
+        fconf.write('# Component     Parameter    Constraint range       Comment\n\n')
+
+
+    def add_constraints(self, id_comp, lim_params=np.full((7,2), np.nan), re_min=None, n_ratio=None):
+        """
+        Descr - Add fitting constraint
+        INPUT
+         - id_comp: Component ID
+         * lim_params: Parameter constraints
+                       7 parameters * (min, max) -> (7*2) array
+                       For values nan, it will not used
+                 index    [  0   |  1   | 2 |  3 | 4 |5 |6 ]
+                 params   [ xpos | ypos |mag|reff| n |ar|pa]
+                 default  [center|center|20 | 20 | 4 |1 |0 ]
+
+        """
+        id_comp=int(id_comp)
+        if(self.silent==False): print("● Added constraint for ", id_comp)
+        fconf = open(self.fn_constraint, 'a')
+        check_valid=np.sum(lim_params, axis=1)
+        par_in_list=['x', 'y', 'mag', 'reff', 'n', 'q', 'pa']
+
+        if(hasattr(re_min, "__len__")):
+            lim_params[3]+=re_min
+
+        for i, par_in in enumerate(par_in_list):
+            if(np.isfinite(check_valid[i])):
+                # if(i<2):
+                #     descr='# Soft constraint: %s-position to within %d and %d of the >>INPUT<< value.'%(par_in, lim_params[i,0], lim_params[i,1])
+                #     fconf.write('  %d        %s        %d  %d     %s\n\n'%(id_comp, par_in, lim_params[i,0], lim_params[i,1], descr))
+
+                if(i<2):
+                    descr='# Soft constraint: Constrains the %s-position to '
+                    descr+='within values from %.2f to %.2f.'%(lim_params[i,0], lim_params[i,1])
+                if(i==2):
+                    descr='# Soft constraint: Constrains the magnitude to '
+                    descr+='within values from %.2f to %.2f.'%(lim_params[i,0], lim_params[i,1])
+                if(i==3):
+                    descr='# Soft constraint: Constrains the effective radius to '
+                    descr+='within values from %.2f to %.2f.'%(lim_params[i,0], lim_params[i,1])
+                if(i==4):
+                    descr='# Soft constraint: Constrains the Sersic index n to '
+                    descr+='within values from %.2f to %.2f.'%(lim_params[i,0], lim_params[i,1])
+                if(i==5):
+                    descr='# Soft constraint: Constrains the axis ratio (b/a) to '
+                    descr+='within values from %.2f to %.2f.'%(lim_params[i,0], lim_params[i,1])
+                if(i==6):
+                    descr='# Soft constraint: Constrains the position angle to '
+                    descr+='within values from %.2f to %.2f.'%(lim_params[i,0], lim_params[i,1])
+                fconf.write('  %d        %s        %.2f to %.2f     %s\n\n'%(id_comp, par_in, lim_params[i,0], lim_params[i,1], descr))
+        if(n_ratio!=None):
+                descr='# Soft constraint: Sersic indice n ratio to be within values from  %.2f to %.2f.'%(n_ratio, 1000)
+                fconf.write('  3/2       n        %.2f    %.2f     %s\n\n'%(n_ratio, 1000, descr))
+        fconf.close()
+
+
+    def run_galfit(self, print_galfit=False, use_dir=os.getcwd()):
+        '''
+        Create and execute Galfit shell commands
+        '> /dev/null' suppresses output
+        '''
+        ### Command
+        if(self.silent==False): print("● Run galfit")
+        cmd = self.fn_galfit
+
+        if(self.extract_sigma): cmd += ' -outsig '
+        if(self.output_block): cmd += ' -c'
+        else: cmd += ' -o2'
+        cmd+= ' %s ' % self.fnc_gal_conf #+ ' > /dev/null'
+
+        if(self.silent==False): print(">> Command : ", cmd)
+
+        ### Run
+        if(print_galfit==True): result=subprocess.run(cmd, shell=True, cwd=use_dir)
+        else: result=subprocess.run(cmd, shell=True, cwd=use_dir, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+        if(self.silent==False):
+            print(">> Result : ", result)
+            if(result.returncode==0): print(">> Galfit done!")
+            else: raise Exception(">> ♣♣♣ Warning! ♣♣♣ Galfit has a problem!")
+        return result
+
+
+class MC2fitRun():
+    """
+    Descr - Run galfit with Runlist (See class AutoGalfit)
+    INPUT
+     *** Working dir ***
+     * dir_work : str (default: '')
+     * proj_folder: str (default: 'galfit/')
+     * group_id : int (default: -1)
+        Run Galfit only for the given group ID.
+        If the value is -1, run galfit for all group IDs.
+     * fni_image, fni_imputmask, fni_psf, fni_sigma: path for input images.
+     * fn_image, fn_imputmask, fn_psf, fn_sigma: absolute path for input images. (if 'fni', it follows above)
+
+     *** parameters ***
+     * add_params_array : array_like
+        It will be added/replaced to the est_params. For None, it will be ignored.
+        See, add_params_mode
+        If length of array is 1, the array will be applied to the all runlists.
+        (Default=None)
+             index    [  0   |  1   | 2 |  3 | 4 |5 |6 ]
+             params   [ xpos | ypos |mag|reff| n |ar|pa]
+
+     * add_params_mode : str or array (default: 'add')
+        Add or replace the est_params.
+        list or array is also possible.
+        (e.g., 'add', ['add', 'add', 'replace'])
+     * is_allow_vary: If false, the value is fixed. Galfit will not change the parameter
+        1) True/False -> Apply the value for all parameters (Default=True)
+        2) Array -> Apply the values for each parameter
+             index    [  0   |  1   | 2(X) |  3 | 4 |5 |6 ]
+             params   [ xpos | ypos |mag(X)|reff| n |ar|pa]  ## Mag always changes (True) except for PSF
+     * fix_psf_mag: If True, mag for PSF is fixed (is_allow_vary[2]=False for PSF)
+     * is_nth_mag_offset: If True, the magnitude of the nth comp. would be respective to 1st comp.
+                          The input values are being offsets. (2nd mag = 1st mag + input values)
+                          (Default=False)
+
+    """
+    def __init__(self,
+                 MC2fitSettingClass,
+                 RunlistClass,
+                 dir_work,
+                 **kwargs):
+
+        ## path setting
+        self.dir_work=dir_work
+        self.proj_folder='galfit/'
+        self.prefix=''
+        self.suffix=''
+        self.fni_image='image.fits'
+        self.fni_masking=None
+        self.fni_psf='psf_area_g.fits'
+        self.fni_sigma='sigma_g.fits'
+        self.is_run_galfit_dir_work=False
+        self.check_files=True
+
+        ## Run setting
+        self.group_id=-1
+
+        ## Output setting
+        self.output_block=True
+        self.overwrite=False
+        self.extract_sigma=False
+
+        ## Parameter array
+        self.add_params_array=None
+        self.Ncomp_add_params_array=0
+        self.add_params_mode='add'
+        self.is_nth_mag_offset=False
+        self.fix_psf_mag=False
+        self.add_constraints_array=None
+        self.is_allow_vary=True
+
+        ## print setting
+        self.silent=False
+        self.print_galfit=False
+        self.debug=False
+
+        ## default values
+        self.plate_scale=0.262
+        self.zeromag=22.5
+        self.est_sky=10
+        self.re_min=None
+        self.n_ratio=None
+
+        self.MC2fitSettingClass=MC2fitSettingClass
+        self.RunlistClass=RunlistClass
+
+        try: self.__dict__.update(MC2fitSettingClass.__dict__)
+        except: pass
+        self.__dict__.update(kwargs)
+        self._post_init()
+
+
+    def _post_init(self):
+        self.plate_scale=dharray.value_repeat_array(self.plate_scale, 2)
+        self.image_size=dharray.value_repeat_array(self.image_size, 2)
+        self._select_run()
+
+
+    def _select_run(self):
+        ## Using group ID, Select runlist
+        if(self.group_id<0): usingrunlist=copy.deepcopy(self.RunlistClass.runlist)
+        else: usingrunlist=copy.deepcopy(self.RunlistClass.runlist[np.isin(self.RunlistClass.runlist['group_ID'], self.group_id)])
+
+        ## If add_params_array is given --> Add values to runlist
+        if(hasattr(self.add_params_array, "__len__")==False):
+            self.Ncomp_add_params_array=0
+        if(self.Ncomp_add_params_array!=0):
+            self.add_params_mode=dharray.repeat_except_array(self.add_params_mode, self.Ncomp_add_params_array)
+            if(self.silent==False): print(">> Additional params array will be considered! Ncomp:", self.Ncomp_add_params_array)
+
+
+        ## ================Loop=================
+        for i_run in range (len(usingrunlist)):
+            thisrunlist=usingrunlist[i_run]
+            self._each_run(thisrunlist)
+
+    def _each_run(self, thisrunlist):
+
+        outputname=thisrunlist['name']
+
+        ## Check if the result is exist --> Skip
+        if(self.overwrite==False):
+            if(os.path.exists(self.dir_work+self.proj_folder+'output_'+self.prefix+self.outputname+self.suffix+".fits")==True): return  # Skip
+            if(os.path.exists(self.dir_work+self.proj_folder+'result_'+self.prefix+self.outputname+self.suffix+".fits")==True): return  # Skip
+
+
+        PyGal=PyGalfit(outputname=outputname,
+                       size_conv=thisrunlist['size_conv'],
+                       size_fitting=thisrunlist['size_fitting'],
+                       **self.__dict__)
+
+        for comp in range (thisrunlist['ncomp']):
+            if(comp<(self.Ncomp_add_params_array)):
+                ## Add / replace est params
+                if(self.add_params_mode[comp]=='add'): thisrunlist['est_params'][comp]+=self.add_params_array[comp]
+                else: thisrunlist['est_params'][comp]=self.add_params_array[comp]
+
+
+            if(comp>0): # Except for the first one
+                if(self.is_nth_mag_offset):
+                    if(self.debug):
+                        print(">> Offset mag")
+                        print(thisrunlist['est_params'][comp,2], thisrunlist['est_params'][0,2])
+                    thisrunlist['est_params'][comp,2]+=thisrunlist['est_params'][0,2]
+
+            if(self.debug):
+                print("\n>> j", comp)
+                print(">>>> EST params: ",thisrunlist['est_params'][comp])
+                print(">>>> LIM params: ",thisrunlist['lim_params'][comp])
+                print(">>>> is_allow_vary: ",self.is_allow_vary)
+
+            ## Add fitting components
+            PyGal.add_fitting_comp(fitting_type=thisrunlist['complist'][comp],
+                                          est_params=thisrunlist['est_params'][comp],
+                                          is_allow_vary=self.is_allow_vary, fix_psf_mag=self.fix_psf_mag)
+            ## Add constraints
+            if(thisrunlist['use_lim']==True):
+                PyGal.add_constraints(id_comp=comp+2, ## 1: Sky, 2: Comp0, 3: Comp1, ...
+                                             lim_params=thisrunlist['lim_params'][comp],
+                                             re_min=self.re_min,
+                                             n_ratio=self.n_ratio
+                                   )
+
+        ## Run
+        if(self.is_run_galfit_dir_work): use_dir=os.path.join(os.getcwd(), self.dir_work)
+        else: use_dir=os.getcwd()
+
+        if(self.debug):
+            print(">>>> use_dir", use_dir)
+        PyGal.run_galfit(print_galfit=self.print_galfit, use_dir=use_dir)
+
+class MC2fitRun_Mulcore():
+    """
+    Descr - Run galfit with Runlist (See class AutoGalfit)
+    INPUT
+     *** Working dir ***
+     * dir_work : str (default: '')
+     * proj_folder: str (default: 'galfit/')
+     * group_id : int (default: -1)
+        Run Galfit only for the given group ID.
+        If the value is -1, run galfit for all group IDs.
+     * fni_image, fni_imputmask, fni_psf, fni_sigma: path for input images.
+     * fn_image, fn_imputmask, fn_psf, fn_sigma: absolute path for input images. (if 'fni', it follows above)
+
+     *** parameters ***
+     * add_params_array : array_like
+        It will be added/replaced to the est_params. For None, it will be ignored.
+        See, add_params_mode
+        If length of array is 1, the array will be applied to the all runlists.
+        (Default=None)
+             index    [  0   |  1   | 2 |  3 | 4 |5 |6 ]
+             params   [ xpos | ypos |mag|reff| n |ar|pa]
+
+     * add_params_mode : str or array (default: 'add')
+        Add or replace the est_params.
+        list or array is also possible.
+        (e.g., 'add', ['add', 'add', 'replace'])
+     * is_allow_vary: If false, the value is fixed. Galfit will not change the parameter
+        1) True/False -> Apply the value for all parameters (Default=True)
+        2) Array -> Apply the values for each parameter
+             index    [  0   |  1   | 2(X) |  3 | 4 |5 |6 ]
+             params   [ xpos | ypos |mag(X)|reff| n |ar|pa]  ## Mag always changes (True) except for PSF
+     * fix_psf_mag: If True, mag for PSF is fixed (is_allow_vary[2]=False for PSF)
+     * is_nth_mag_offset: If True, the magnitude of the nth comp. would be respective to 1st comp.
+                          The input values are being offsets. (2nd mag = 1st mag + input values)
+                          (Default=False)
+
+    """
+    def __init__(self,
+                 MC2fitSettingClass,
+                 RunlistClass,
+                 DirInfoClass,
+                 remove_galfit_interval=300,
+                 add_params_array_set=None,
+                 re_cut_list=None,
+                 skiplist=None,
+                 **kwargs):
+
+        ## Multicore setting
+        self.use_try=True
+        self.Ncore=2
+        self.show_multicore=True
+
+        ## Additional parameters
+        self.add_params_array_set=add_params_array_set
+        self.remove_galfit_interval=remove_galfit_interval
+        self.re_cut_list=re_cut_list
+        self.skiplist=skiplist
+
+        ## Class
+        self.MC2fitSettingClass=MC2fitSettingClass
+        self.RunlistClass=RunlistClass
+        self.DirInfoClass=DirInfoClass
+
+        try: self.__dict__.update(MC2fitSettingClass.__dict__)
+        except: pass
+        self.__dict__.update(kwargs)
+        self._post_init()
+        if(self.Ncore!=1):
+            self._show_multicore_result()
+
+
+    def _show_multicore_result(self):
+        Nfailed=np.sum(np.isnan(self.multi_res))
+        print("======== Multicore result ========")
+        print("● Succeed: %d / %d"%(np.sum(self.multi_res==0), len(self.DirInfoClass.dir_work_list)))
+        print("● Failed: %d / %d"%(Nfailed, len(self.DirInfoClass.dir_work_list)))
+        if(Nfailed>0):
+            print(">> See where: self.multi_res")
+            print(">> To debug, use Ncore=1, and use_try = False")
+
+    def _post_init(self):
+        self.plate_scale=dharray.value_repeat_array(self.plate_scale, 2)
+        self.image_size=dharray.value_repeat_array(self.image_size, 2)
+
+        if(hasattr(self.add_params_array_set, "__len__")==False): self.add_params_array_set=np.full(len(self.DirInfoClass.dir_work_list), None)
+        if(hasattr(self.skiplist, "__len__")==False): self.skiplist=np.full(len(self.DirInfoClass.dir_work_list), False)
+        if(hasattr(self.re_cut_list, "__len__")==False): self.re_cut_list=np.full(len(self.DirInfoClass.dir_work_list), None)
+        if(len(self.add_params_array_set)!=len(self.DirInfoClass.dir_work_list)):
+            print("Warning! Check add_params_array!")
+            print("Stop the function")
+            return
+
+        global sub_run_process
+
+        def sub_run_process(i):
+            dir_work=self.DirInfoClass.dir_work_list[i]
+            fn_done=dir_work+self.proj_folder+"done_galfit.dat"
+            if(self.fast_skip==True):
+                if(os.path.exists(fn_done)): return 0
+            if(self.skiplist[i]==True): return 0
+
+            if(i%self.remove_galfit_interval==0):
+                existlist1=glob.glob('./galfit.*')
+                for fb in existlist1:
+                    try: os.remove(fb)
+                    except: pass
+                try: os.remove('./fit.log')
+                except: pass
+
+
+            MC2fitRun(dir_work=dir_work,
+                      add_params_array=self.add_params_array_set[i],
+                      re_cut=self.re_cut_list[i],
+                      **self.__dict__
+                     )
+
+
+            np.savetxt(fn_done, np.array(['done']), fmt="%s")
+            return 0
+
+        self.multi_res=mulcore.multicore_run(sub_run_process, len(self.DirInfoClass.dir_work_list), Ncore=self.Ncore,
+                              use_try=self.use_try, show_progress=self.show_progress, debug=self.show_multicore)
+        self.multi_res=np.array(self.multi_res)
 
 ##=============================================
 
