@@ -4,7 +4,7 @@ import DH_MC2fit_sub as dhmc2fitsub
 import DH_multicore as mulcore
 
 import numpy as np
-import os
+import os, glob, shutil
 import random
 import time
 import pickle
@@ -712,6 +712,7 @@ class MC2fitRun():
         self.re_min=None
         self.n_ratio=None
 
+        ## Class
         self.MC2fitSettingClass=MC2fitSettingClass
         self.RunlistClass=RunlistClass
 
@@ -851,6 +852,7 @@ class MC2fitRun_Mulcore():
         self.use_try=True
         self.Ncore=2
         self.show_multicore=True
+        self.show_progress=-1
 
         ## Additional parameters
         self.add_params_array_set=add_params_array_set
@@ -920,8 +922,238 @@ class MC2fitRun_Mulcore():
             np.savetxt(fn_done, np.array(['done']), fmt="%s")
             return 0
 
-        self.multi_res=mulcore.multicore_run(sub_run_process, len(self.DirInfoClass.dir_work_list), Ncore=self.Ncore,
-                              use_try=self.use_try, show_progress=self.show_progress, debug=self.show_multicore)
+        self.multi_res=mulcore.multicore_run(sub_run_process,
+                                             len(self.DirInfoClass.dir_work_list),
+                                             Ncore=self.Ncore,
+                                             use_try=self.use_try,
+                                             how_progress=self.show_progress,
+                                             ebug=self.show_multicore)
+        self.multi_res=np.array(self.multi_res)
+
+class MC2fitPostProcessing():
+    """
+
+    """
+    def __init__(self,
+                 MC2fitSettingClass,
+                 RunlistClass,
+                 dir_work,
+                 **kwargs):
+
+
+        ## path setting
+        self.dir_work=dir_work
+        self.proj_folder='galfit/'
+        self.fn_base_noext = ''
+
+        ## print setting
+        self.silent=False
+
+        ## Parameters
+        self.chi2_radius_list = [-1, 50]
+        self.chi_item_namelist = ['F', '50']
+        self.repair_fits = False
+        self.centermag = 'sersic'
+        self.sersic_res = 500
+
+        ## Class
+        self.MC2fitSettingClass=MC2fitSettingClass
+        self.RunlistClass=RunlistClass
+
+        try: self.__dict__.update(MC2fitSettingClass.__dict__)
+        except: pass
+        self.__dict__.update(kwargs)
+        self._post_init()
+
+
+    def _post_init(self):
+        self.plate_scale=dharray.value_repeat_array(self.plate_scale, 2)
+        self.image_size=dharray.value_repeat_array(self.image_size, 2)
+
+
+        ## Sigma
+        if((self.fni_sigma==None) | (self.fni_sigma=='none')):
+            self.fn_sigma = None
+        else: self.fn_sigma=self.dir_work+self.fni_sigma
+        ## Mask
+        if((self.fni_masking==None) | (self.fni_masking=='none')):
+            self.fni_masking = None
+        else: self.fn_masking=self.dir_work+self.fni_masking
+
+        self.check_params()
+        self.post_chi2() ## Calc chi2
+
+        ##================ Centermag ========================
+        if(self.centermag!=None):
+            self.ResThis=MC2fitResult(group_id=None,
+                                      runlist=self.RunlistClass.runlist,
+                                      ignore_no_files=True,
+                                      comp_autoswap=False, comp_4th_nsc_autoswap=False, comp_4th_ss_autoswap=False,
+                                      **self.__dict__)
+
+
+            if(self.centermag=='sersic'):
+                self.centermag_sersic()
+            elif(self.centermag=='galfit'):
+                self.centermag_galfit()
+
+    def check_params(self):
+        if(self.silent==False): print(">> Check params")
+        if(hasattr(self.chi2_radius_list, "__len__")):
+            self.Nseq=len(self.chi2_radius_list)
+        else: self.Nseq=1
+        if(self.silent==False): print(">>>> Nseq : ", self.Nseq)
+        if(type(self.chi_item_namelist)==str):
+            Nname=1
+        else: Nname=len(self.chi_item_namelist)
+        if(self.silent==False): print(">>>> Nchi_item_name : ", Nname)
+
+        if(Nname!=self.Nseq):
+            print("Warning! The input length is strange!")
+            print(">> chi_radius : ", self.Nseq)
+            print(">> chi_item_name : ", Nname)
+
+    def post_chi2(self):
+        ##chi2
+        if(self.silent==False): print(">> Post chi2")
+        fnlist=dharray.array_attach_string(self.RunlistClass.runlist['name'], 'result_', add_at_head=True)
+        fnlist=dharray.array_attach_string(fnlist, self.dir_work+self.proj_folder, add_at_head=True)
+        fnlist=dharray.array_attach_string(fnlist, '.fits')
+        self.fnlist=np.array(fnlist)
+        Chi2Update(**self.__dict__)
+
+    def centermag_sersic(self):
+        if(self.silent==False): print(">> Sersic Centermag")
+        tmag2, sersiclist2=add_totalmag(self.ResThis.Data.val, comp=2,
+                                        sersic_res=self.sersic_res, plate_scale=self.plate_scale[0], zeromag=self.zeromag)
+        tmag3, sersiclist3=add_totalmag(self.ResThis.Data.val, comp=3,
+                                        sersic_res=self.sersic_res, plate_scale=self.plate_scale[0], zeromag=self.zeromag)
+        ## INPUT
+
+        for i, fn in enumerate (self.fnlist[sersiclist2]):
+            hdul=fits.open(fn)
+            if(len(hdul)>1): save_ext=2
+            else: save_ext=0
+            inputvalue="%.4f"%tmag2[i]
+            inputvalue+=" +/- 0.0000"
+            fits.setval(fn, '2_MAG', value=inputvalue, ext=save_ext, after='2_MU_E', comment='Integrated magnitude (post-processed)')
+
+        for i, fn in enumerate (self.fnlist[sersiclist3]):
+            if(len(hdul)>1): save_ext=2
+            else: save_ext=0
+            inputvalue="%.4f"%tmag3[i]
+            inputvalue+=" +/- 0.0000"
+            fits.setval(fn, '3_MAG', value=inputvalue, ext=save_ext, after='3_MU_E', comment='Integrated magnitude (post-processed)')
+
+def add_totalmag(datarray, comp=2, sersic_res=500, plate_scale=0.262, zeromag=22.5):
+    ## Integral mag
+    if(comp==2):
+        sersiclist=np.where(np.isfinite(datarray['2_MU_E']))
+        usingdata=datarray[sersiclist]
+        ## Old version
+        # intmag=sersic_integral2D(mu_e=usingdata['2_MU_E'], reff=usingdata['2_RE'],
+        #                   n=usingdata['2_N'], ar=usingdata['2_AR'], plate_scale=plate_scale, res=sersic_res)
+        intmag = dhmc2fitsub.mu_to_mag(mu_e=usingdata['2_MU_E'], Re=usingdata['2_RE'],
+                          n=usingdata['2_N'], ar=usingdata['2_AR'], plate_scale=plate_scale, zeromag=zeromag)
+
+    elif(comp==3):
+        sersiclist=np.where(np.isfinite(datarray['3_MU_E']))
+        usingdata=datarray[sersiclist]
+        # intmag=sersic_integral2D(mu_e=usingdata['3_MU_E'], reff=usingdata['3_RE'],
+        #                   n=usingdata['3_N'], ar=usingdata['3_AR'], plate_scale=plate_scale, res=sersic_res)
+        intmag = dhmc2fitsub.mu_to_mag(mu_e=usingdata['3_MU_E'], Re=usingdata['3_RE'],
+                          n=usingdata['3_N'], ar=usingdata['3_AR'], plate_scale=plate_scale, zeromag=zeromag)
+    return intmag, sersiclist[0]
+
+class MC2fitPostProcessing_Mulcore():
+    """
+
+    """
+    def __init__(self,
+                 MC2fitSettingClass,
+                 RunlistClass,
+                 DirInfoClass,
+                 **kwargs):
+
+        ## Multicore setting
+        self.use_try=True
+        self.Ncore=2
+        self.show_multicore=True
+        self.show_progress=-1
+
+        ## Class
+        self.MC2fitSettingClass=MC2fitSettingClass
+        self.RunlistClass=RunlistClass
+        self.DirInfoClass=DirInfoClass
+
+        try: self.__dict__.update(MC2fitSettingClass.__dict__)
+        except: pass
+        self.__dict__.update(kwargs)
+        self._post_init()
+        if(self.Ncore!=1):
+            self._show_multicore_result()
+
+
+    def _show_multicore_result(self):
+        Nfailed=np.sum(np.isnan(self.multi_res))
+        print("======== Multicore result ========")
+        print("● Succeed: %d / %d"%(np.sum(self.multi_res==0), len(self.DirInfoClass.dir_work_list)))
+        print("● Failed: %d / %d"%(Nfailed, len(self.DirInfoClass.dir_work_list)))
+        if(Nfailed>0):
+            print(">> See where: self.multi_res")
+            print(">> To debug, use Ncore=1, and use_try = False")
+
+
+    def _post_init(self):
+#         self.plate_scale=dharray.value_repeat_array(self.plate_scale, 2)
+#         self.image_size=dharray.value_repeat_array(self.image_size, 2)
+#         if(hasattr(self.chi2_radius_list, "__len__")==False): ## Const
+#             self.chi2_radius_list=np.repeat(self.chi2_radius_list, len(DirInfo.dir_work_list)) ## 1D array
+#         if(hasattr(self.chi2_radius_list, "__len__")):
+#             if(np.ndim(self.chi2_radius_list)==1): ## 1D array
+#                 self.chi2_radius_list=np.array([self.chi2_radius_list]).T ## 2D array (N*1)
+
+        global sub_run_process
+
+        def sub_run_process(i):
+            dir_work=self.DirInfoClass.dir_work_list[i]
+            fn_done=dir_work+self.proj_folder+"done_post.dat"
+            if(self.fast_skip==True):
+                if(os.path.exists(fn_done)): return 0
+
+            if(i%self.remove_galfit_interval==0):
+                existlist1=glob.glob('./galfit.*')
+                for fb in existlist1:
+                    try: os.remove(fb)
+                    except: pass
+                try: os.remove('./fit.log')
+                except: pass
+
+#             dum=dhgalfit.PostProcessing(proj_folder=proj_folder, Runlist=Runlist, dir_work=dir_work,
+#                                 fna_sigma=fna_sigma, fna_masking=fna_masking,
+#                                 fna_image=fna_image, fna_psf=fna_psf,
+#                                 chi_radius=chi_radius[i], repair_fits=repair_fits, image_size=image_size,
+#                                 chi_item_name=chi_item_name,
+#                                 fn_base_noext=fn_base_noext,
+#                                 plate_scale=plate_scale, zeromag=zeromag,
+#                                 chi2_full_image=chi2_full_image,
+#                                 centermag=centermag, sersic_res=500,
+#                                 overwrite=overwrite, silent=silent, print_galfit=print_galfit)
+
+            MC2fitPostProcessing(dir_work=dir_work,
+                      **self.__dict__
+                     )
+
+
+            np.savetxt(fn_done, np.array(['done']), fmt="%s")
+            return 0
+
+        self.multi_res=mulcore.multicore_run(sub_run_process,
+                                             len(self.DirInfoClass.dir_work_list),
+                                             Ncore=self.Ncore,
+                                             use_try=self.use_try,
+                                             show_progress=self.show_progress,
+                                             debug=self.show_multicore)
         self.multi_res=np.array(self.multi_res)
 
 ##=============================================
