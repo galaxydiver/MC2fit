@@ -25,6 +25,75 @@ import subprocess
 from multiprocessing import Pool
 import warnings
 
+def pix2mu(array, plate_scale=0.262, zeromag=22.5):
+    # array : pixel values --> flux / pixel2
+    f=array/plate_scale**2  # flux/arcsec2
+    return zeromag-2.5*np.log10(f) # mag / asec2
+
+
+def mu2pix(array, plate_scale=0.262, zeromag=22.5):
+    array= (array - zeromag)/-2.5
+    return (10**array)*plate_scale**2
+
+def get_bn(n):
+    return gammaincinv(2*n, 1/2)
+
+def get_mu_to_re_flux(Re, n, ar=1):  ## Flux R<Re
+    term1 = Re**2 * 2*np.pi*n * ar
+    bn=get_bn(n)
+    term2 = np.exp(bn) / (bn)**(2*n)
+    R=Re
+    x = bn*(R/Re)
+    term3 = gammainc(2*n, x)*gamma(2*n)
+    return term1*term2*term3
+
+def mu_to_mag(mu_e, Re, n, ar=1, plate_scale=0.262, zeromag=22.5):
+    amp = 10**((zeromag-mu_e)/2.5) ## Amplitude (Flux / arcsec^2)  ## zeromag will not affect the results
+    conversion = get_mu_to_re_flux(Re*plate_scale, n, ar)
+    tot_flux = 2 * amp * conversion ## Total flux = Flux(R<Re)*2
+    return zeromag-2.5*np.log10(tot_flux)
+
+def mag_to_mu(mag, Re, n, ar=1, plate_scale=0.262, zeromag=22.5):
+    flux = 10**((zeromag-mag)/2.5) ## Amplitude (Flux / arcsec^2)  ## zeromag will not affect the results
+    conversion = get_mu_to_re_flux(Re*plate_scale, n, ar)
+    amp = flux / 2 / conversion ## Total flux = Flux(R<Re)*2
+    return zeromag-2.5*np.log10(amp)
+
+
+def sersic_integral2D(mu_e, reff, n, ar, plate_scale, res=500, scale_fac=100):
+    """
+    Descr - measure total magnitude of a given galaxy
+    INPUT
+     - mu_e : surface brightness at Reff [mag/arc2]
+     - reff : Reff
+     - n : Sersic index
+     - ar : axis ratio (b/a)
+     - plate_scale : Plate scale [arcsec / pix]
+     OUTPUT
+     - Total magnitude [mag]
+
+    """
+
+    mag_factor=scale_fac/reff
+
+    amp=10**((25-mu_e)/2.5)
+    amp=amp*((plate_scale/mag_factor)**2)  # amp : flux / pix2
+    e=e=1-ar  # ar : b/a,   e = (a-b)/a
+
+    model=Sersic2D(amplitude=amp, r_eff=reff*mag_factor, n=n, ellip=e)
+
+    x,y = np.meshgrid(np.arange(res)-res/2, np.arange(res)-res/2)
+    ## Multi-gals
+    if(hasattr(mu_e, "__len__")):
+        x=np.repeat(x.reshape(np.shape(x)[0], np.shape(x)[1], 1), len(mu_e), axis=2)
+        y=np.repeat(y.reshape(np.shape(y)[0], np.shape(y)[1], 1), len(mu_e), axis=2)
+        img=model(x,y)
+        flux=np.sum(np.sum(img, axis=0), axis=0)
+    else:
+        img=model(x,y)
+        flux=np.sum(img)
+    return 25-2.5*np.log10(flux)
+
 
 class ReadGalfitData():
     def __init__(self, fn, ext_list=[1,2,3], fn_base_noext='', repair_fits=False,
@@ -69,8 +138,6 @@ class ReadGalfitData():
                 self.header_img=fits.getheader(path)
             if(np.sum(np.isin([2,3], ext_list))): self.model=fits.getdata(fn)
             if(np.isin(3, ext_list)): self.resi = self.image - self.model
-
-
 
 #=================== AUTO Galfit ==========================
 
@@ -377,9 +444,6 @@ class AutoGalfit:
         return result
 
 
-
-
-
 #============================= Drawing ==============================
 def show_FITSimage(fn, ext_data=0, ext_wcs=0, use_zscale=True, use_wcs=True):
     image_data = fits.getdata(fn, ext=ext_data)
@@ -508,6 +572,99 @@ def drawing_galfit(fn='./TestRun/result_test.fits', fn_base_noext='',
 
 
     return ax0
+
+
+def drawing_galfit_old(fn='./TestRun/result_test.fits', gs=None, data_index=0, silent=False,              #Basic
+                   fn_masking=None, show_masking=True, show_masking_center=False, fill_masking=True,    #Masking
+                   show_htitle=True, show_vtitle=True, descr='',  c_vtitle='k',                       #descr
+                   show_ticks=True, scale_percentile=None, vmin=None, vmax=None,
+                   resi_scale=1, is_resi_scale_zero_center=False,
+                   show_colorbar=True, offset=-10):
+    ## Gridspec Setting
+    if(gs==None):
+        fig=plt.figure(figsize=(13,4))
+        gs=gridspec.GridSpec(1,3)
+
+    ## open file
+    hdu=fits.open(fn)
+    imagedata=hdu[1].data  # Sample data
+    chi2=hdu[2].header['CHI2NU']
+    titlelist=['Original', 'Model', 'Residual']
+    imgsize=np.shape(imagedata)
+    if(silent==False):
+        print("[Descr : ", descr, "]")
+        print(">> Reduced Chi2 :", chi2)
+        print(">> Orig - Max, Min, PTP :", hdu[1].data.max(), hdu[1].data.min(), hdu[1].data.ptp())
+        print(">> Resi - Max, Min, PTP :", hdu[3].data.max(), hdu[3].data.min(), hdu[3].data.ptp())
+
+    ## Masking file
+    if(type(fn_masking)!=type(None)): masking=fits.getdata(fn_masking)
+    else:
+        show_masking=False
+        show_masking_center=False
+    # Masking center positions
+    if(show_masking_center==True):
+        maxmask=np.nanmax(masking)
+        centerpos=np.full((maxmask, 2), np.nan)
+        for i in range (maxmask): # loop for [1, maxmask]
+            target=np.where(masking==(i+1))
+            centerpos[i]=np.nanmean(target, axis=1)
+
+    #=============== Galfit subfiles - 1 : Obs / 2 : Model / 3 : Residual ============
+    for i in range (3):
+        ax0=plt.subplot(gs[data_index*3+i])
+        imagedata=hdu[i+1].data
+        if(i!=2): imagedata=imagedata+ offset
+        cmap='bone'
+
+        mean, median, std=np.nanmean(imagedata), np.nanmedian(imagedata), np.nanstd(imagedata)
+        if(show_masking==True):
+            maskedimage=np.ma.masked_array(imagedata, masking, fill_value=median) #median masking
+            if(fill_masking==True): imagedata=maskedimage.filled()
+            else: imagedata=maskedimage
+
+        # Scales
+        if(i==2): # For residual
+            if(is_resi_scale_zero_center): scale_center=0
+            else: scale_center=(vmax+vmin)/2
+            if(resi_scale<0):
+                resi_scale=-resi_scale
+                cmap='bone_r'
+            else: cmap='bone'
+            newscale=(vmax-vmin)*resi_scale/2
+            vmin=scale_center-newscale
+            vmax=scale_center+newscale
+
+        if(vmin!=None):
+            a=ax0.imshow(imagedata, cmap=cmap, origin='lower', vmin=vmin, vmax=vmax)
+            if(show_colorbar): plt.colorbar(a)
+
+        elif(scale_percentile==None):
+            a=ax0.imshow(imagedata, cmap=cmap, origin='lower')
+            if(show_colorbar): plt.colorbar(a)
+            vmin, vmax=a.get_clim()
+
+        else:
+            newscale=[np.percentile(imagedata, 50-scale_percentile), np.percentile(imagedata, 50+scale_percentile)]
+            a=ax0.imshow(imagedata, cmap=cmap, origin='lower', vmin=newscale[0], vmax=newscale[1])
+            if(show_colorbar): plt.colorbar(a)
+            vmin, vmax=a.get_clim()
+
+
+        # Masking centers
+        if(show_masking_center==True): plt.scatter(centerpos[:,1], centerpos[:,0], c='r', s=20)
+
+        # Show titles
+        if(show_htitle==True): plt.title(titlelist[i], size=15, fontname='DejaVu Serif', fontweight='semibold')
+        if(i==0):
+            if(show_vtitle==True): plt.ylabel(descr+"\n"+r"$\chi^2$=%.4f"%chi2, size=20, c=c_vtitle, fontname='DejaVu Serif', fontweight='semibold')
+
+        if(show_ticks==True):
+            ax0.set_xticks([0, imgsize[0]/2, imgsize[0]])
+            ax0.set_yticks([0, imgsize[1]/2, imgsize[1]])
+            ax0.tick_params(labelsize=10, width=1, length=6, axis='both', direction='in', right=True, top=True)
+#         ax0.xaxis.set_minor_locator(AutoMinorLocator(5))
+#         ax0.yaxis.set_minor_locator(AutoMinorLocator(5))
 
 
 

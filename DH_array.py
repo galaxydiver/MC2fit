@@ -408,6 +408,12 @@ def repeat_except_array(item, size):
         else: return item[:size]
     else: return np.repeat(item, size)
 
+def value_repeat_array(value,  repeat):
+    if(hasattr(value, "__len__")==False):
+        value=np.array([value]*repeat)
+    else: value=np.array(value)
+    if(len(value)==1): value=np.array([value[0]]*repeat)
+    return value
 
 def make_aperture_mask(imgsize, radius, center=-1):
     mask=np.ones((imgsize, imgsize), dtype=int)
