@@ -2294,7 +2294,7 @@ class PostProcessing_Mulcore():
         self.Ncore=2
         self.show_multicore=True
         self.show_progress=-1
-        self.chi2_radius_array=[-1, 50]
+        self.chi2_radius_array_set=[-1, 50]
         self.chi_item_namelist=['F', '50']
 
         ## Class
@@ -2322,9 +2322,9 @@ class PostProcessing_Mulcore():
 
     def _post_init(self):
 
-        self.chi2_radius_array=np.array(self.chi2_radius_array)
-        if(np.ndim(self.chi2_radius_array)==1):
-            self.chi2_radius_array=np.repeat(np.array([self.chi2_radius_array]),
+        self.chi2_radius_array_set=np.array(self.chi2_radius_array_set)
+        if(np.ndim(self.chi2_radius_array_set)==1):
+            self.chi2_radius_array_set=np.repeat(np.array([self.chi2_radius_array_set]),
                                              len(self.DirInfoClass.dir_work_list),
                                              axis=0)
 #         self.plate_scale=dharray.value_repeat_array(self.plate_scale, 2)
@@ -2363,7 +2363,7 @@ class PostProcessing_Mulcore():
 #                                 overwrite=overwrite, silent=silent, print_galfit=print_galfit)
 
             PostProcessing(dir_work=dir_work,
-            chi2_radius_list=self.chi2_radius_array[i],
+            chi2_radius_list=self.chi2_radius_array_set[i],
                       **self.__dict__
                      )
 
@@ -2552,6 +2552,7 @@ class ResPack():
         self.reff_snr_n_cut=2
         self.re_cut_list=None
 
+
         ## Class
         self.MC2fitSettingClass=MC2fitSettingClass
         self.RunlistClass=RunlistClass
@@ -2603,7 +2604,7 @@ class ResPack():
 
             return fulldat, int(bob_index), int(bobwarn_index), best_index, bestwarn_index, int(Nfile)
 
-        fulldat, bob_index, bobwarn_index, best_index, bestwarn_index, Nfile = mulcore.multicore_run(
+        self.raw_output = mulcore.multicore_run(
                                 sub_getdata,
                                 len(self.DirInfoClass.dir_work_list),
                                 Ncore=self.Ncore,
@@ -2612,6 +2613,12 @@ class ResPack():
                                 show_progress=self.show_progress,
                                 debug=self.show_multicore,
                                 errorcode=[0,0,0,0,0,0])
+
+        if(self.silent==False):
+            print("======== output ========")
+            print(self.raw_output)
+        fulldat, bob_index, bobwarn_index, best_index, bestwarn_index, Nfile = self.raw_output
+
 
         self.fulldat=fulldat #Full data
         self.groupid_list=np.unique(self.fulldat[0]['group_ID']).astype(int)
