@@ -28,8 +28,6 @@ import subprocess
 from multiprocessing import Pool
 import warnings
 
-
-
 @dataclass
 class Setting:
     """
