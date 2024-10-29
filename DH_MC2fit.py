@@ -346,7 +346,7 @@ class RunlistForBest():
                                         est_params_array=np.array([[0, 0, 0, 0, 0, 0, 0]]*self.Ncomp_list[i], dtype='object'), ## This will be added --> All values = 0
                                         group_id=thisrunlist['group_ID']*10,
                                         size_conv=thisrunlist['size_conv'],
-                                        lim_params_array=thisrunlist['lim_params']
+                                        lim_params_array=thisrunlist['lim_params'],
                                        )
 
             if(i==0): self.Runlist_all=copy.deepcopy(self.Runlist_set[i])
@@ -371,6 +371,7 @@ class RunlistForBest():
                                   Ncomp_add_params_array=self.Ncomp_list[i],
                                   add_params_array_set=using_params_array,
                                   skiplist=skiplist,
+                                  is_allow_vary=False,
                                  )
             ## Warn
             skiplist=np.isnan(self.ResPackClass.bestwarn_index[:,i]) | (self.ResPackClass.bestwarn_index[:,i]==self.ResPackClass.best_index[:,i]) ## Nan or same with the previous
@@ -379,6 +380,7 @@ class RunlistForBest():
                                   Ncomp_add_params_array=self.Ncomp_list[i],
                                   add_params_array_set=using_params_array_warn,
                                   skiplist=skiplist,
+                                  is_allow_vary=False,
                                  )
 
 
