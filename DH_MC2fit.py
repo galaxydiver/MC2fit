@@ -29,7 +29,7 @@ from multiprocessing import Pool
 import warnings
 
 @dataclass
-class MC2fitSetting:
+class Setting:
     """
     Setting for MC2fit
 
@@ -107,7 +107,7 @@ class MC2fitSetting:
         if(self.proj_folder[-1]!='/'): self.proj_folder=self.proj_folder+"/" ## For directory format
         print("Setting completed")
 
-class MC2fitRunlist():
+class Runlist():
     """
     Descr - Runlist
     INPUT
@@ -938,7 +938,7 @@ class MC2fitRun_Mulcore():
                                              debug=self.show_multicore)
         self.multi_res=np.array(self.multi_res)
 
-class MC2fitResult():
+class Result():
     """
     Descr - Galfit result function
     INPUT
@@ -962,33 +962,38 @@ class MC2fitResult():
     """
     def __init__(self,
                  MC2fitSettingClass,
-                 runlist,
+                 RunlistClass,
                  dir_work,
                  **kwargs):
 
-        self.runlist=runlist
+        ## Path
         self.dir_work=dir_work
-        self.paramslist=['XC', 'YC', 'MU_E', 'RE', 'N', 'AR', 'PA', 'MAG']
+        self.input_only=False
+        self.fnlist=None
 
-#         runlist=None, dir_work=None,  ## 2) For input_runlist mode
-#         fnlist=None, namelist=None,  ## 3) For input_manual mode
+        ## Data
         self.group_id=None
+
+        ## Parameters & Criteria
+        self.paramslist=['XC', 'YC', 'MU_E', 'RE', 'N', 'AR', 'PA', 'MAG']
+        self.comp_crit='RChi_50'
         self.tolerance=1e-3 # Chi2 tolerance for "Good results" (|Min chi2 - chi2 |/(Min chi2) < tolerance)
         self.ignore_no_files=False
-        self.comp_crit='RChi_50'
-        self.input_only=False
         self.reff_snr_crit=2
         self.reff_snr_n_cut=100
         self.n_crit=2
-        self.re_cut=[0,0],
-        self.extended_itemlist=['war_tot', 'is_swap', 'group_ID']
+        self.re_cut=[0,0]
         self.chi2_itemlist= ['CHI2NU', 'AIC_F', 'RChi_50', 'AIC_50']
+        self.extended_itemlist=['war_tot', 'is_swap', 'group_ID']
         self.comp_autoswap=False
         self.swapmode='N'
         self.comp_4th_nsc_autoswap=True
         self.comp_4th_ss_autoswap=True
         self.img_center=100
 
+        ## Class
+        self.MC2fitSettingClass=MC2fitSettingClass
+        self.RunlistClass=RunlistClass
 
         try: self.__dict__.update(MC2fitSettingClass.__dict__)
         except: pass
@@ -1005,13 +1010,14 @@ class MC2fitResult():
         self.galfit_itemlist=self.galfit_itemlist_2nd+self.galfit_itemlist_3rd
         self.extended_itemlist=self.chi2_itemlist+self.extended_itemlist
 
-#         self.dir_work=str(dir_work)
-        self.dir_work_galfit=os.path.join(self.dir_work, self.proj_folder)
+
+        self.dir_work_proj=os.path.join(self.dir_work, self.proj_folder)
 
         self.plate_scale=dharray.value_repeat_array(self.plate_scale, 2)
         self.image_size=dharray.value_repeat_array(self.image_size, 2)
         self._input()
         self._dataswap()
+
 
         ## Find best
         if(self.Data.Ndata!=0):
@@ -1025,45 +1031,18 @@ class MC2fitResult():
 
 
     def _input(self):
-
         if(self.silent==False): print("=========== Run ResultGalfit ===========\n")
-        ## ========= INPUT ===================
-        ## INPUT 2) Runlist
-        if(hasattr(self.runlist, "__len__")):  ## If runlist is not empty, use runlist
-            self._input_runlist(runlist=self.runlist, group_id=self.group_id, dir_work=self.dir_work_galfit)
-        ## INPUT 3) Manual
-        elif(hasattr(self.fnlist, "__len__")):   ## If fnlist is not empty, use fnlist
+        ## INPUT 1) Runlist
+        if(hasattr(self.RunlistClass, "runlist")):  ## If runlist is not empty, use runlist
+            if(hasattr(self.RunlistClass.runlist, "__len__")):  ## If runlist is not empty, use runlist
+                self._input_runlist(runlist=self.RunlistClass.runlist,
+                                    group_id=self.group_id,
+                                    dir_work=self.dir_work_proj)
+        ## INPUT 2) Manual
+        if(hasattr(self.fnlist, "__len__")):   ## If fnlist is not empty, use fnlist
             self._input_manual(fnlist=self.fnlist, namelist=self.namelist)
 
         if(self.input_only): return
-
-    def _dataswap(self):
-        ## Swap 2nd and 3rd
-        self.Data.val['is_swap']=0
-        self.Data.err['is_swap']=0
-        self.Data.war['is_swap']=0
-        if(self.comp_autoswap):
-            self.swaplist=self.make_swaplist(self.swapmode)
-            self.Data.swap_data(self.swaplist, self.galfit_itemlist_2nd, self.galfit_itemlist_3rd)
-
-        if((self.comp_4th_nsc_autoswap) & (np.isin(['4_XC'], self.Data.val.dtype.names)[0])):
-            list_4th=np.isfinite(self.Data.val['4_XC'])
-            ## Double PSF - closer
-            dpsf=np.isnan(self.Data.val['3_N']) & np.isnan(self.Data.val['4_N'])
-            dist23=(self.Data.val['2_XC']-self.Data.val['3_XC'])**2 + (self.Data.val['2_YC']-self.Data.val['3_YC'])**2
-            dist24=(self.Data.val['2_XC']-self.Data.val['4_XC'])**2 + (self.Data.val['2_YC']-self.Data.val['4_YC'])**2
-            targetlist=dpsf & list_4th & (dist24<dist23)
-            self.Data.swap_data(targetlist, self.galfit_itemlist_3rd, self.galfit_itemlist_4th)
-
-        if((self.comp_4th_ss_autoswap) & (np.isin(['4_XC'], self.Data.val.dtype.names)[0])):
-            ## SS + PSF - closer to the center (except for N=5 gal)
-            ds=np.isfinite(self.Data.val['2_N']) & np.isfinite(self.Data.val['3_N'])
-            dist2=(self.Data.val['2_XC']-img_center)**2 + (self.Data.val['2_YC']-img_center)**2
-            dist3=(self.Data.val['3_XC']-img_center)**2 + (self.Data.val['3_YC']-img_center)**2
-            is_not_psf= self.Data.val['3_N']!=5
-            targetlist=ds & list_4th & (dist3<dist2) & is_not_psf
-            self.Data.swap_data(targetlist, self.galfit_itemlist_2nd, self.galfit_itemlist_3rd)
-
 
     def _input_runlist(self, runlist, group_id=None, dir_work=None):
         """
@@ -1109,7 +1088,7 @@ class MC2fitResult():
             if(hasattr(runlist, "__len__")==False):
                 print("\n● Input data with the manual mode")
 
-        self.Data=ResGalData(namelist=namelist, fnlist=fnlist,
+        self.Data=dhmc2fit.ResGalData(namelist=namelist, fnlist=fnlist,
                             data_type=self.galfit_itemlist+self.extended_itemlist,
                             chi2_itemlist=self.chi2_itemlist
                             )
@@ -1139,6 +1118,35 @@ class MC2fitResult():
             try: self.check_bound()
             except: pass
         self.safe_itemlist=self.Data.clean_data(self.galfit_itemlist)
+
+
+    def _dataswap(self):
+        ## Swap 2nd and 3rd
+        self.Data.val['is_swap']=0
+        self.Data.err['is_swap']=0
+        self.Data.war['is_swap']=0
+        if(self.comp_autoswap):
+            self.swaplist=self.make_swaplist(self.swapmode)
+            self.Data.swap_data(self.swaplist, self.galfit_itemlist_2nd, self.galfit_itemlist_3rd)
+
+        if((self.comp_4th_nsc_autoswap) & (np.isin(['4_XC'], self.Data.val.dtype.names)[0])):
+            list_4th=np.isfinite(self.Data.val['4_XC'])
+            ## Double PSF - closer
+            dpsf=np.isnan(self.Data.val['3_N']) & np.isnan(self.Data.val['4_N'])
+            dist23=(self.Data.val['2_XC']-self.Data.val['3_XC'])**2 + (self.Data.val['2_YC']-self.Data.val['3_YC'])**2
+            dist24=(self.Data.val['2_XC']-self.Data.val['4_XC'])**2 + (self.Data.val['2_YC']-self.Data.val['4_YC'])**2
+            targetlist=dpsf & list_4th & (dist24<dist23)
+            self.Data.swap_data(targetlist, self.galfit_itemlist_3rd, self.galfit_itemlist_4th)
+
+        if((self.comp_4th_ss_autoswap) & (np.isin(['4_XC'], self.Data.val.dtype.names)[0])):
+            ## SS + PSF - closer to the center (except for N=5 gal)
+            ds=np.isfinite(self.Data.val['2_N']) & np.isfinite(self.Data.val['3_N'])
+            dist2=(self.Data.val['2_XC']-img_center)**2 + (self.Data.val['2_YC']-img_center)**2
+            dist3=(self.Data.val['3_XC']-img_center)**2 + (self.Data.val['3_YC']-img_center)**2
+            is_not_psf= self.Data.val['3_N']!=5
+            targetlist=ds & list_4th & (dist3<dist2) & is_not_psf
+            self.Data.swap_data(targetlist, self.galfit_itemlist_2nd, self.galfit_itemlist_3rd)
+
 
 
     def check_bound(self, runlist=None):
@@ -1195,7 +1203,6 @@ class MC2fitResult():
         """
         Descr - Check Reff by comparing uncertainty
         INPUT
-         ** runlist : Automatically get limits (default : None)
         """
         if(snr_crit==None):
             self.Data.reff_strange=np.full(len(self.Data.val), False)
@@ -1239,7 +1246,6 @@ class MC2fitResult():
         """
         Descr - Check specific value of n
         INPUT
-         ** runlist : Automatically get limits (default : None)
         """
         if(n_crit==None):
             self.Data.n_strange=np.full(len(self.Data.val), False)
@@ -1303,9 +1309,477 @@ class MC2fitResult():
 
     def save_data(self, fna_output='saved_resgal.dat', fn_output='', return_array=False):
         if(fna_output==None): fn_output=None
-        elif(fn_output==''): fn_output=self.dir_work_galfit+fna_output
+        elif(fn_output==''): fn_output=self.dir_work_proj+fna_output
         if(self.silent==False): print("\n● Save the result : ", fn_output)
-        return self.Data.save_data(fn_output=fn_output, add_header=self.dir_work_galfit, return_array=return_array)
+        return self.Data.save_data(fn_output=fn_output, add_header=self.dir_work_proj, return_array=return_array)
+
+    ##========================== Show data & display ============================
+    def show_data(self, only_val=False, hide_nan=True, hide_PA=True, hide_fail_read=True):
+        if(np.sum(self.Data.is_file_exist)==0):
+            print(">> No data!")
+            return
+        if(hide_nan==True): newitemlist=self.safe_itemlist
+        else: newitemlist=np.array(self.itemlist) ## All the items
+        if(hide_PA==True):
+            drop=np.where((newitemlist=='2_AR') | (newitemlist=='2_PA')
+            | (newitemlist=='3_AR') | (newitemlist=='3_PA'))
+            newitemlist=np.delete(newitemlist, drop)
+
+        newitemlist=np.append(['group_ID', 'is_swap'], newitemlist)
+        if(hide_fail_read==True): newfilelist=self.Data.is_file_exist
+        else: newfilelist=np.full(len(self.Data.is_file_exist), True) ## All the files
+        errorlist=self.Data.namelist[self.Data.war_tot.astype(bool)]
+        lowsnrlist=self.Data.namelist[self.Data.reff_strange.astype(bool) | self.Data.n_strange.astype(bool)]
+
+        newitemlist_chi2=np.append(newitemlist, self.chi2_itemlist)
+        self.df_display(self.Data.val[newfilelist][newitemlist_chi2], newfilelist, errorlist, lowsnrlist, caption='Values')
+
+        if(only_val==False):
+            self.df_display(self.Data.err[newfilelist][newitemlist], newfilelist, errorlist, lowsnrlist, caption='Error')
+            self.df_display(self.Data.war[newfilelist][newitemlist], newfilelist, errorlist, lowsnrlist, caption='Warning', is_limit_format=True)
+
+    def df_display(self, data, newfilelist, errorlist, lowsnrlist, caption='datatype', is_limit_format=False):
+        df=pd.DataFrame(data, index=self.Data.namelist[newfilelist])
+        if(is_limit_format==True): formatting='{:.0f}'
+        else: formatting='{:f}'
+        df=df.style.apply(lambda x: ['background: lightyellow' if x.name in self.Data.namelist[self.best_near]
+                                      else '' for i in x],
+                           axis=1)\
+            .apply(lambda x: ['background: bisque' if x.name in self.Data.namelist[self.best_warn]
+                              else '' for i in x],
+                   axis=1)\
+            .apply(lambda x: ['background: lightgreen' if x.name in self.Data.namelist[self.best]
+                                      else '' for i in x],
+                           axis=1)\
+            .apply(lambda x: ['color: red' if x.name in errorlist
+                          else '' for i in x],
+               axis=1)\
+            .apply(lambda x: ['font-style: italic; font-weight:bold' if x.name in lowsnrlist
+                          else '' for i in x],
+               axis=1)\
+            .format(formatting)\
+            .set_caption(caption).set_table_styles([{
+            'selector': 'caption',
+            'props': [
+                ('color', 'red'),
+                ('font-size', '16px')
+            ]
+        }])
+        display(df)
+
+    def make_swaplist(self, mode='RE'):
+        if(mode=='RE'):
+            return np.where(self.Data.val['2_RE']<self.Data.val['3_RE'])[0] # Larger Re
+        elif(mode=='N'):
+            return np.where(self.Data.val['3_N']<self.Data.val['2_N'])[0] #Lower N
+        elif(mode=='MU'):
+            swaplist=np.zeros(len(self.Data.val), dtype=bool)
+            for i in range (len(self.Data.val)):
+                if(np.isnan(self.Data.val[i]['3_N'])): continue
+                s2=Sersic1D(amplitude=mu2pix(self.Data.val[i]['2_MU_E'], plate_scale=self.plate_scale, zeromag=self.zeromag),
+                                            r_eff=self.Data.val[i]['2_RE'], n=self.Data.val[i]['2_N'])
+                s3=Sersic1D(amplitude=mu2pix(self.Data.val[i]['3_MU_E'], plate_scale=self.plate_scale, zeromag=self.zeromag),
+                            r_eff=self.Data.val[i]['3_RE'], n=self.Data.val[i]['3_N'])
+                re=np.nanmax([self.Data.val[i]['2_RE'], self.Data.val[i]['3_RE']])
+                swaplist[i]=(s2(re)<s3(re))  #Outer region -> brighter
+            return np.where(swaplist==True)
+        elif(mode=='2MU'):
+            swaplist=np.zeros(len(self.Data.val), dtype=bool)
+            for i in range (len(self.Data.val)):
+                if(np.isnan(self.Data.val[i]['3_N'])): continue
+                s2=Sersic1D(amplitude=mu2pix(self.Data.val[i]['2_MU_E'], plate_scale=self.plate_scale, zeromag=self.zeromag),
+                            r_eff=self.Data.val[i]['2_RE'], n=self.Data.val[i]['2_N'])
+                s3=Sersic1D(amplitude=mu2pix(self.Data.val[i]['3_MU_E'], plate_scale=self.plate_scale, zeromag=self.zeromag),
+                            r_eff=self.Data.val[i]['3_RE'], n=self.Data.val[i]['3_N'])
+                re=2*np.nanmax([self.Data.val[i]['2_RE'], self.Data.val[i]['3_RE']])
+                swaplist[i]=(s2(re)<s3(re))  #Outer region -> brighter
+            return np.where(swaplist==True)
+        elif(mode=='3MU'):
+            swaplist=np.zeros(len(self.Data.val), dtype=bool)
+            for i in range (len(self.Data.val)):
+                if(np.isnan(self.Data.val[i]['3_N'])): continue
+                s2=Sersic1D(amplitude=mu2pix(self.Data.val[i]['2_MU_E'], plate_scale=self.plate_scale, zeromag=self.zeromag),
+                            r_eff=self.Data.val[i]['2_RE'], n=self.Data.val[i]['2_N'])
+                s3=Sersic1D(amplitude=mu2pix(self.Data.val[i]['3_MU_E'], plate_scale=self.plate_scale, zeromag=self.zeromag),
+                            r_eff=self.Data.val[i]['3_RE'], n=self.Data.val[i]['3_N'])
+                re=3*np.nanmax([self.Data.val[i]['2_RE'], self.Data.val[i]['3_RE']])
+                swaplist[i]=(s2(re)<s3(re))  #Outer region -> brighter
+            return np.where(swaplist==True)
+
+class Result():
+    """
+    Descr - Galfit result function
+    INPUT
+      0) For all input types
+      * tolerance: Chi2 tolerance for "Good results" (|Min chi2 - chi2 |/(Min chi2) < tolerance) (Default=1e-3)
+      * silent: Print text (Default=False)
+      * ignore_no_files: Run the code even though there is no any files. (Default=False)
+      * auto_input: Auto_input mode (sequence 1 -> 2 -> 3) (Default=True)
+      * group_id: If None, load all. If not, load input group ID only. (Default=None)
+
+      1) Load data
+      * fn_load: (Default='')
+      * fna_load: (Default='submodels.dat')
+      ** if None / or if it cannot find the data, go next
+      2) Runlist
+      * runlist: (Default=None)
+      * dir_work: working directory (Default=None)
+      ** if runlist is None, go next
+      3) Manual
+      * fnlist, namelist
+    """
+    def __init__(self,
+                 MC2fitSettingClass,
+                 RunlistClass,
+                 dir_work,
+                 **kwargs):
+
+        ## Path
+        self.dir_work=dir_work
+        self.input_only=False
+        self.fnlist=None
+
+        ## Data
+        self.group_id=None
+
+        ## Parameters & Criteria
+        self.paramslist=['XC', 'YC', 'MU_E', 'RE', 'N', 'AR', 'PA', 'MAG']
+        self.comp_crit='RChi_50'
+        self.tolerance=1e-3 # Chi2 tolerance for "Good results" (|Min chi2 - chi2 |/(Min chi2) < tolerance)
+        self.ignore_no_files=False
+        self.reff_snr_crit=2
+        self.reff_snr_n_cut=100
+        self.n_crit=2
+        self.re_cut=[0,0]
+        self.chi2_itemlist= ['CHI2NU', 'AIC_F', 'RChi_50', 'AIC_50']
+        self.extended_itemlist=['war_tot', 'is_swap', 'group_ID']
+        self.comp_autoswap=False
+        self.swapmode='N'
+        self.comp_4th_nsc_autoswap=True
+        self.comp_4th_ss_autoswap=True
+        self.img_center=100
+
+        ## Class
+        self.MC2fitSettingClass=MC2fitSettingClass
+        self.RunlistClass=RunlistClass
+
+        try: self.__dict__.update(MC2fitSettingClass.__dict__)
+        except: pass
+        self.__dict__.update(kwargs)
+        self._post_init()
+
+    def _post_init(self):
+        self.galfit_itemlist_2nd=dharray.array_attach_string(self.paramslist, '2_', add_at_head=True)
+        self.galfit_itemlist_3rd=dharray.array_attach_string(self.paramslist, '3_', add_at_head=True)
+        self.galfit_itemlist_4th=dharray.array_attach_string(self.paramslist, '4_', add_at_head=True)
+
+        # basically, galfit_itemlist= 2nd + 3rd.
+        # If there is 4th component, it will be added at 'input_runlist'
+        self.galfit_itemlist=self.galfit_itemlist_2nd+self.galfit_itemlist_3rd
+        self.extended_itemlist=self.chi2_itemlist+self.extended_itemlist
+
+
+        self.dir_work_proj=os.path.join(self.dir_work, self.proj_folder)
+
+        self.plate_scale=dharray.value_repeat_array(self.plate_scale, 2)
+        self.image_size=dharray.value_repeat_array(self.image_size, 2)
+        self._input()
+        self._dataswap()
+
+
+        ## Find best
+        if(self.Data.Ndata!=0):
+            self.best=self.find_best(remove_warn=True)
+            self.best_warn=self.find_best(remove_warn=False)
+            try: self.best_near=self.find_near_best(self.Data.val[comp_crit][self.best],
+                                               tolerance=self.tolerance, comp_crit=comp_crit)
+            except: self.best_near=self.best
+        else: ## No data
+            self.best, self.best_warn, self.best_near = np.array([np.nan]), np.array([np.nan]), np.array([np.nan])
+
+
+    def _input(self):
+        if(self.silent==False): print("=========== Run ResultGalfit ===========\n")
+        ## INPUT 1) Runlist
+        if(hasattr(self.RunlistClass, "runlist")):  ## If runlist is not empty, use runlist
+            if(hasattr(self.RunlistClass.runlist, "__len__")):  ## If runlist is not empty, use runlist
+                self._input_runlist(runlist=self.RunlistClass.runlist,
+                                    group_id=self.group_id,
+                                    dir_work=self.dir_work_proj)
+        ## INPUT 2) Manual
+        if(hasattr(self.fnlist, "__len__")):   ## If fnlist is not empty, use fnlist
+            self._input_manual(fnlist=self.fnlist, namelist=self.namelist)
+
+        if(self.input_only): return
+
+    def _input_runlist(self, runlist, group_id=None, dir_work=None):
+        """
+        Descr - Input data using the given runlist
+        ** It will extract fnlist, namelist, and run input_manual
+        ** See input_manual as well
+        INPUT
+         - runlist
+         * group_id : (None : see all group_id)
+         * dir_work : working dir for data
+        """
+        if(self.silent==False):
+            print("\n● Input data with Runlist")
+            print(">> Group ID : ", group_id)
+
+        ## Cut runlist
+        if(group_id==None): pass
+        else: runlist=runlist[np.isin(runlist['group_ID'], group_id)]
+
+        ## Maximum Ncomponent
+        self.Ncomp_max=np.nanmax(runlist['ncomp'])
+        if(self.Ncomp_max>2):
+            self.galfit_itemlist=[]
+            for i in range (self.Ncomp_max):
+                galfit_itemlist=dharray.array_attach_string(self.paramslist, str(int(i+2))+'_', add_at_head=True)
+                self.galfit_itemlist+=galfit_itemlist
+
+        namelist=runlist['name']
+        fnlist=dharray.array_attach_string(namelist, 'result_', add_at_head=True)
+        fnlist=dharray.array_attach_string(fnlist, dir_work, add_at_head=True)
+        fnlist=dharray.array_attach_string(fnlist, '.fits')
+        self._input_manual(fnlist, namelist, runlist=runlist)
+
+    def _input_manual(self, fnlist, namelist, runlist=None):
+        """
+        Descr - Manually input data
+        ** See input_runlist as well
+        INPUT
+         - fnlist
+         - namelist
+        """
+        if(self.silent==False):
+            if(hasattr(runlist, "__len__")==False):
+                print("\n● Input data with the manual mode")
+
+        self.Data=ResGalData(namelist=namelist, fnlist=fnlist,
+                             data_type=self.galfit_itemlist+self.extended_itemlist,
+                             chi2_itemlist=self.chi2_itemlist
+                            )
+
+        if(self.silent==False): print(">> # of data : ", len(fnlist))
+        if(len(self.Data.namelist)==0):
+            if(self.ignore_no_files==False): raise Exception(">> ♣♣♣ Warning! ♣♣♣ Namelist is empty!")
+            else: print(">> ♣♣♣ Warning! ♣♣♣ Namelist is empty!")
+        self.Data.read_data(itemlist=self.galfit_itemlist)
+
+        if(self.Data.Ndata==0):
+            if(self.ignore_no_files==False): raise Exception(">> ♣♣♣ Warning! ♣♣♣ No files!")
+            else: print(">> ♣♣♣ Warning! ♣♣♣ No files! .... e.g.)", fnlist[0])
+        if(self.silent==False): print(">> # of read data : ", self.Data.Ndata)
+
+        ## If it has runlist
+        if(hasattr(runlist, "__len__")):
+            self.Data.val['group_ID']=runlist['group_ID']
+            self.Data.err['group_ID']=runlist['group_ID']
+            self.Data.war['group_ID']=runlist['group_ID']
+            self.check_bound(runlist=runlist)
+            self.check_strange_radius(snr_crit=self.reff_snr_crit, reff_snr_n_cut=self.reff_snr_n_cut)
+            self.check_strange_n(n_crit=self.n_crit)
+
+        ## If not --> Manual check
+        else:
+            try: self.check_bound()
+            except: pass
+        self.safe_itemlist=self.Data.clean_data(self.galfit_itemlist)
+
+
+    def _dataswap(self):
+        ## Swap 2nd and 3rd
+        self.Data.val['is_swap']=0
+        self.Data.err['is_swap']=0
+        self.Data.war['is_swap']=0
+        if(self.comp_autoswap):
+            self.swaplist=self.make_swaplist(self.swapmode)
+            self.Data.swap_data(self.swaplist, self.galfit_itemlist_2nd, self.galfit_itemlist_3rd)
+
+        if((self.comp_4th_nsc_autoswap) & (np.isin(['4_XC'], self.Data.val.dtype.names)[0])):
+            list_4th=np.isfinite(self.Data.val['4_XC'])
+            ## Double PSF - closer
+            dpsf=np.isnan(self.Data.val['3_N']) & np.isnan(self.Data.val['4_N'])
+            dist23=(self.Data.val['2_XC']-self.Data.val['3_XC'])**2 + (self.Data.val['2_YC']-self.Data.val['3_YC'])**2
+            dist24=(self.Data.val['2_XC']-self.Data.val['4_XC'])**2 + (self.Data.val['2_YC']-self.Data.val['4_YC'])**2
+            targetlist=dpsf & list_4th & (dist24<dist23)
+            self.Data.swap_data(targetlist, self.galfit_itemlist_3rd, self.galfit_itemlist_4th)
+
+        if((self.comp_4th_ss_autoswap) & (np.isin(['4_XC'], self.Data.val.dtype.names)[0])):
+            ## SS + PSF - closer to the center (except for N=5 gal)
+            ds=np.isfinite(self.Data.val['2_N']) & np.isfinite(self.Data.val['3_N'])
+            dist2=(self.Data.val['2_XC']-img_center)**2 + (self.Data.val['2_YC']-img_center)**2
+            dist3=(self.Data.val['3_XC']-img_center)**2 + (self.Data.val['3_YC']-img_center)**2
+            is_not_psf= self.Data.val['3_N']!=5
+            targetlist=ds & list_4th & (dist3<dist2) & is_not_psf
+            self.Data.swap_data(targetlist, self.galfit_itemlist_2nd, self.galfit_itemlist_3rd)
+
+
+
+    def check_bound(self, runlist=None):
+
+        """
+        Descr - Check parameter at the limit
+        INPUT
+         ** runlist : Automatically get limits (default : None)
+        """
+        self.bound=np.copy(self.Data.val)
+        self.bound.fill(0)
+        if(self.silent==False):
+            print("\n◯ Check bound")
+            if(hasattr(runlist, "__len__")): print(">>>> Runlist exists")
+            else: print(">>>> Runlist does not exist")
+
+        using_itemlist=np.copy(self.galfit_itemlist)
+        mag_pos=np.where(np.char.find(using_itemlist, 'MAG')>0)[0]
+        using_itemlist=using_itemlist[np.isin(np.arange(len(using_itemlist)), mag_pos, invert=True)]
+
+        x_pos=np.where(np.char.find(using_itemlist, 'XC')>0)[0]
+        y_pos=np.where(np.char.find(using_itemlist, 'YC')>0)[0]
+
+        value_data=dharray.array_flexible_to_simple(self.Data.val[using_itemlist])
+        pos_pos=np.append(x_pos, y_pos) #Center position
+        for i_run in range(len(runlist)):
+
+            thislim=copy.deepcopy(runlist['lim_params'][i_run])
+            thislim[:,3]+=self.re_cut ## Add manual cut
+            thislim=np.vstack(thislim)
+            #this_pos_pos=pos_pos[pos_pos<len(thislim)]  # cut higher components
+            #(e.g,) Total galfit_itemlist is up to 3rd comp. but this run has only 2nd comp.
+            #thislim[this_pos_pos]+=100 # Center position
+
+            thisvals=value_data[i_run][:len(thislim)] # cut higher components
+            boundlist=np.where((thisvals<=thislim[:,0]) | (thisvals>=thislim[:,1]))[0]
+
+            if(len(boundlist)!=0):
+                boundlist=np.array(using_itemlist)[boundlist]
+                self.bound[boundlist][i_run]=2
+
+        ## Whether use constraint or not
+        if(hasattr(runlist, "__len__")):
+            removelist=np.where(runlist['use_lim']==0)
+            self.bound[removelist]=0
+
+        self.Data.war=dharray.array_quickname(dharray.array_flexible_to_simple(self.Data.war)
+                                      + dharray.array_flexible_to_simple(self.bound),
+                                      names=self.Data.war.dtype.names, dtypes=self.Data.war.dtype)
+
+
+    def check_strange_radius(self, snr_crit=1, reff_snr_n_cut=1e9):
+
+        """
+        Descr - Check Reff by comparing uncertainty
+        INPUT
+        """
+        if(snr_crit==None):
+            self.Data.reff_strange=np.full(len(self.Data.val), False)
+            self.Data.reff_snr=np.full(len(self.Data.val), np.nan)
+            return
+        if(self.silent==False):
+            print("\n◯ Check Reff")
+
+        using_itemlist=np.copy(self.galfit_itemlist)
+        n_pos=np.where(np.char.find(using_itemlist, 'N')>0)[0]
+        cut_using_itemlist=using_itemlist[n_pos]
+        n_data=dharray.array_flexible_to_simple(self.Data.val[cut_using_itemlist]) ## n val
+
+        reff_pos=np.where(np.char.find(using_itemlist, 'RE')>0)[0]
+        cut_using_itemlist=using_itemlist[reff_pos]
+
+        value_data=dharray.array_flexible_to_simple(self.Data.val[cut_using_itemlist]) ## Reff val
+        error_data=dharray.array_flexible_to_simple(self.Data.err[cut_using_itemlist]) ## Reff err
+
+
+        with np.errstate(divide='ignore'):
+            self.Data.reff_snr=value_data/error_data # SNR
+        with warnings.catch_warnings():  ## Ignore warning. Nan warning is natural in this case.
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            usingdat=copy.deepcopy(self.Data.reff_snr)
+            usingdat[np.isnan(error_data) & np.isfinite(value_data)]=0   # It has the value, but error is inf.
+            usingdat[n_data>reff_snr_n_cut]=np.nan ## sersic index higher than the given value -> not apply SNR cut
+            for i in range (len(usingdat[0])): ## Loop for a component
+                self.Data.war[cut_using_itemlist[i]][usingdat[:,i]<snr_crit]+=100
+            sumarray=np.nanmin(usingdat, axis=1)
+
+
+        self.Data.reff_strange=(sumarray<snr_crit) # Lower than the criteria
+        self.Data.reff_nan=np.isnan(error_data) & np.isfinite(value_data) # It has the value, but error is inf.
+        self.Data.reff_nan=np.sum(self.Data.reff_nan, axis=1)
+        self.Data.reff_strange[self.Data.reff_nan!=0]=True
+        # above: We want to avoid PSF only data (no Re) being catagorized as an error
+        # cf) np.isnan(sumarray) --> PSF is now reff_strange
+
+    def check_strange_n(self, n_crit=2):
+        """
+        Descr - Check specific value of n
+        INPUT
+        """
+        if(n_crit==None):
+            self.Data.n_strange=np.full(len(self.Data.val), False)
+            return
+
+        using_itemlist=np.copy(self.galfit_itemlist)
+        n_pos=np.where(np.char.find(using_itemlist, 'N')>0)[0]
+        cut_using_itemlist=using_itemlist[n_pos]  ##"2_N", "3_N", "4_N", ...
+        n_data=dharray.array_flexible_to_simple(self.Data.val[cut_using_itemlist]) ## n val (array)
+        model_ss = (np.isfinite(n_data[:,0]) & np.isfinite(n_data[:,1])) ## Only SS (& SS+PSF)model
+        n_strange_raw=(n_data==n_crit)
+        self.Data.n_strange=(np.sum(n_strange_raw, axis=1).astype(bool) & model_ss)
+
+        for i in range (len(n_strange_raw[0])):
+            # target=(n_strange_raw[:,i]==True)
+            target=((n_strange_raw[:,i]==True) & model_ss)
+            self.Data.war[cut_using_itemlist[0]][target]+=100
+
+
+
+    def find_best(self, remove_warn=True, comp_crit=None):
+        if(self.silent==False): print("\n● Find the best submodel")
+        if(comp_crit==None): comp_crit=self.comp_crit
+        chi2list=self.Data.val[comp_crit]
+        usingindex=np.arange(len(chi2list))
+        if(remove_warn==True):
+            if(self.silent==False): print(">> Without warning")
+            usingindex=usingindex[(self.Data.war_tot==0)
+                                   & (self.Data.reff_strange==False)
+                                   & (self.Data.n_strange==False)]
+            ## If no results
+            if(len(usingindex)==0):
+                if(self.silent==False): print(">> No results. Finding the best regardless of the warning")
+                return self.find_best(remove_warn=False)
+            ## If All data is NaN
+            checknan=np.sum(np.isnan(chi2list[usingindex]))
+            if(checknan==len(usingindex)):
+                if(self.silent==False): print(">> No results. Finding the best regardless of the warning")
+                return self.find_best(remove_warn=False)
+        else:
+            ## Reff_Strange filter
+            good_data=usingindex[(self.Data.reff_strange==False)
+                                 & (self.Data.n_strange==False)
+                                 & np.isfinite(chi2list[usingindex])]
+            ## If no results
+            if(len(good_data)==0):
+                if(self.silent==False): print(">> All data is ruled out by the Reff SNR criterion.")
+                pass
+            else: usingindex=usingindex[(self.Data.reff_strange==False) & (self.Data.n_strange==False)]
+
+        min_chi=np.nanmin(chi2list[usingindex])
+        minpos=np.where(chi2list[usingindex]==min_chi)[0]
+        return usingindex[minpos]
+
+    def find_near_best(self, min_chi, tolerance=0, comp_crit='RChi_50'):
+        chi2list=self.Data.val[comp_crit]
+        if(hasattr(min_chi, "__len__")): min_chi=np.nanmin(min_chi)
+        self.chi2_diff=np.abs(chi2list-min_chi)/min_chi
+        nearpos=np.where(self.chi2_diff<tolerance)[0] ## Fraction
+        return nearpos
+
+    def save_data(self, fna_output='saved_resgal.dat', fn_output='', return_array=False):
+        if(fna_output==None): fn_output=None
+        elif(fn_output==''): fn_output=self.dir_work_proj+fna_output
+        if(self.silent==False): print("\n● Save the result : ", fn_output)
+        return self.Data.save_data(fn_output=fn_output, add_header=self.dir_work_proj, return_array=return_array)
 
     ##========================== Show data & display ============================
     def show_data(self, only_val=False, hide_nan=True, hide_PA=True, hide_fail_read=True):
@@ -1401,6 +1875,118 @@ class MC2fitResult():
             return np.where(swaplist==True)
 
 
+
+class ResultBest(Result):
+    def __init__(self, MomRes, silent=True, reff_snr_crit=None, n_crit=None,
+                 include_warn=False, get_single=False, comp_crit=None):
+        self.silent=silent
+        self.include_warn=include_warn
+        self.get_single=get_single
+        self.MomRes=MomRes
+        if(comp_crit==None):
+            self.comp_crit=self.MomRes.comp_crit
+        else: self.comp_crit=comp_crit
+
+        if(reff_snr_crit==None):
+            self.reff_snr_crit=self.MomRes.reff_snr_crit # None --> use MomRes values
+            self.reff_snr_n_cut=self.MomRes.reff_snr_n_cut
+
+        else: self.MomRes.check_strange_radius(snr_crit=self.reff_snr_crit, reff_snr_n_cut=self.reff_snr_n_cut) ## If reff_snr_crit is updated, update the strange list
+
+        if(n_crit==None): self.n_crit=self.MomRes.n_crit
+        else: self.MomRes.check_strange_n(n_crit=self.n_crit)
+
+        self.galfit_itemlist=self.MomRes.galfit_itemlist
+        self.chi2_itemlist=self.MomRes.chi2_itemlist
+        self.dir_work=self.MomRes.dir_work
+        self.dir_work_proj=self.MomRes.dir_work_proj
+        val_ori=self.MomRes.Data.val
+
+        self.grouplist=np.unique(val_ori['group_ID']).astype(int)
+        self.grouplist=self.grouplist[np.isfinite(self.grouplist)]
+        self.group_non_empty=np.full(len(self.grouplist), True)
+
+        self._find_bestsubmodels()
+        self._clean_results()
+
+
+    def _find_bestsubmodels(self):
+
+        val_ori=self.MomRes.Data.val
+        index_total=np.arange(len(val_ori))
+        self.bestsubmodels=np.zeros(len(self.grouplist), dtype=object) # Best models (w/o warning)
+        self.bestsubmodels_warn=np.zeros(len(self.grouplist), dtype=object) #Best models w/ w/o warning
+        self.chi2_submodels=np.zeros(len(self.grouplist), dtype=object) # Chi2 (or AIC) for submodels
+        self.chi2_bestsubmodels=np.zeros(len(self.grouplist), dtype=object) # Chi2 (or AIC) for bestsubmodels
+
+        for i, group_id in enumerate(self.grouplist):
+            self.Data=copy.deepcopy(self.MomRes.Data) ## Temporary
+            selected=np.where(val_ori['group_ID']==group_id)[0]
+
+            if(len(selected)==0):
+                self._nan_thismodel(i) ## No data selected
+                continue
+            try: self.Data.cut_data(selected)
+            except:
+                self._nan_thismodel(i) ## No data selected
+                continue
+            if((self.Data.Ndata==0)):
+                self._nan_thismodel(i) ## No data selected
+                continue
+
+            index_this=index_total[selected]  # Index w.r.t. total data
+            # if the best submodel does not have error -> remove all except for the best submodel
+            # if the best submodel has error -> find the best submodel without error (worse than the best)
+            # after that, remove submodels worse than the best submodel w/o error
+
+            index=self.find_best(remove_warn=True)
+            if(self.get_single): index=[index[0]]
+            self.bestsubmodels[i]=index_this[index]
+            self.chi2_submodels[i]=np.copy(self.Data.val[self.comp_crit])
+            self.chi2_bestsubmodels[i]=np.copy(self.Data.val[self.comp_crit][index])
+
+            #Best models w/ w/o warning
+            index=self.find_best(remove_warn=False)
+            if(self.get_single): index=[index[0]]
+            self.bestsubmodels_warn[i]=index_this[index]
+
+    def _nan_thismodel(self, i):
+        self.group_non_empty[i]=False
+        self.bestsubmodels[i]=np.array([np.nan])
+        self.chi2_submodels[i]=np.array([np.nan])
+        self.chi2_bestsubmodels[i]=np.array([np.nan])
+        self.bestsubmodels_warn[i]=np.array([np.nan])
+
+    def _clean_results(self):
+#         if(np.sum(self.group_non_empty)==0): ## No data
+#             self.bestsubmodels_flat=None
+#             self.bestsubmodels_warn_flat=None
+#             self.Data=copy.deepcopy(self.MomRes.Data)
+#             self.safe_itemlist=self.Data.clean_data(self.galfit_itemlist)
+#         else:
+        self.bestsubmodels_flat=dharray.array_flatten(self.bestsubmodels, return_in_object=True).astype(float)
+        self.bestsubmodels_warn_flat=dharray.array_flatten(self.bestsubmodels_warn, return_in_object=True).astype(float)
+        self.Data=copy.deepcopy(self.MomRes.Data)
+
+        # Remove nan and cut data
+        if(self.include_warn==True):
+            imsi=self.bestsubmodels_warn_flat[np.isfinite(self.bestsubmodels_warn_flat)].astype(int)
+        else:
+            imsi=self.bestsubmodels_flat[np.isfinite(self.bestsubmodels_flat)].astype(int)
+        self.Data.cut_data(imsi)
+
+        ## Best of the Best
+        self.safe_itemlist=self.Data.clean_data(self.galfit_itemlist)
+        if(np.sum(self.group_non_empty)!=0):
+            self.best=self.find_best(remove_warn=True)
+            self.best_warn=self.find_best(remove_warn=False)
+            try: self.best_near=self.find_near_best(self.Data.val[self.comp_crit][self.best],
+                                               tolerance=self.MomRes.tolerance,
+                                               comp_crit=self.comp_crit)
+            except: self.best_near=self.best
+
+
+
 class Chi2Update():
     """
     Descr - Calculate chi2 and update Galfit fits
@@ -1421,8 +2007,8 @@ class Chi2Update():
        ** 'RChi_'+'chi_item_name' will be added for the reduced chi2 value
        ** 'NDOF_'+'chi_item_name' will be added for the number of DOF
        ** 'LIK_'+'chi_item_name' will be added for the likehood value
-     * fn_base_noext : Base Path when the input file does not have extensions
-       ** In this case, image file will be loaded from 'fn_base_noext' + header['DATAIN']
+     * fn_add_front : Base Path when the input file does not have extensions
+       ** In this case, image file will be loaded from 'fn_add_front' + header['DATAIN']
      * Overwrite : (default : False)
     """
     def __init__(self,
@@ -1440,7 +2026,7 @@ class Chi2Update():
         self.image_size=200
         self.chi2_radius_list=[-1, 50]
         self.chi_item_namelist=['F', '50']
-        self.fn_base_noext=''
+        self.fn_add_front=''
         self.overwrite=False,
         self.silent=True
 
@@ -1479,7 +2065,7 @@ class Chi2Update():
     def _main_work(self, fn):
         ## File read
         try:
-            GDat=ReadGalfitData(fn, fn_base_noext=self.fn_base_noext, repair_fits=self.repair_fits)
+            GDat=ReadGalfitData(fn, fn_add_front=self.fn_add_front, repair_fits=self.repair_fits)
         except:
             if(self.silent==False): print(">> Cannot read the file:", fn)
             return
@@ -1555,7 +2141,7 @@ def cal_chi2(dat, sig, mask=None, radius=-1):
     except: return np.nan,0
 
 
-class MC2fitPostProcessing():
+class PostProcessing():
     """
 
     """
@@ -1569,7 +2155,7 @@ class MC2fitPostProcessing():
         ## path setting
         self.dir_work=dir_work
         self.proj_folder='galfit/'
-        self.fn_base_noext = ''
+        self.fn_add_front = ''
 
         ## print setting
         self.silent=False
@@ -1610,7 +2196,7 @@ class MC2fitPostProcessing():
 
         ##================ Centermag ========================
         if(self.centermag!=None):
-            self.ResThis=MC2fitResult(group_id=None,
+            self.ResThis=Result(group_id=None,
                                       runlist=self.RunlistClass.runlist,
                                       ignore_no_files=True,
                                       comp_autoswap=False, comp_4th_nsc_autoswap=False, comp_4th_ss_autoswap=False,
@@ -1690,7 +2276,7 @@ def add_totalmag(datarray, comp=2, sersic_res=500, plate_scale=0.262, zeromag=22
                           n=usingdata['3_N'], ar=usingdata['3_AR'], plate_scale=plate_scale, zeromag=zeromag)
     return intmag, sersiclist[0]
 
-class MC2fitPostProcessing_Mulcore():
+class PostProcessing_Mulcore():
     """
 
     """
@@ -1759,13 +2345,13 @@ class MC2fitPostProcessing_Mulcore():
 #                                 fna_image=fna_image, fna_psf=fna_psf,
 #                                 chi_radius=chi_radius[i], repair_fits=repair_fits, image_size=image_size,
 #                                 chi_item_name=chi_item_name,
-#                                 fn_base_noext=fn_base_noext,
+#                                 fn_add_front=fn_add_front,
 #                                 plate_scale=plate_scale, zeromag=zeromag,
 #                                 chi2_full_image=chi2_full_image,
 #                                 centermag=centermag, sersic_res=500,
 #                                 overwrite=overwrite, silent=silent, print_galfit=print_galfit)
 
-            MC2fitPostProcessing(dir_work=dir_work,
+            PostProcessing(dir_work=dir_work,
                       **self.__dict__
                      )
 
@@ -1785,7 +2371,7 @@ class MC2fitPostProcessing_Mulcore():
 
 
 class ReadGalfitData():
-    def __init__(self, fn, ext_list=[1,2,3], fn_base_noext='', repair_fits=False,
+    def __init__(self, fn, ext_list=[1,2,3], fn_add_front='', repair_fits=False,
                  replace_folder=None):
         """
         Descr - Read galfit output file
@@ -1796,8 +2382,8 @@ class ReadGalfitData():
            ** 1 : Original image
            ** 2 : Model image
            ** 3 : Residual image ([2] - [1])
-         * fn_base_noext : Base Path when the input file does not have extensions
-           ** In this case, image file [1] will be loaded from 'fn_base_noext' + header['DATAIN']
+         * fn_add_front : Additional Base Path
+           ** image file [1] will be loaded from 'fn_add_front' + header['DATAIN']
          * replace_folder: Change the path for image file.
            ** e.g.) replace_folder = ['SMDG', 'SMDG_original']
         """
@@ -1809,6 +2395,7 @@ class ReadGalfitData():
             ## Re-write the file if the code above does not work
             #hdul.writeto(fn, overwrite=True)
         hdul.close()
+
         if(self.Next>2): ## If the input file has extensions
             self.header=fits.getheader(fn, ext=2)
             if(np.isin(1, ext_list)):
@@ -1817,15 +2404,16 @@ class ReadGalfitData():
             if(np.isin(2, ext_list)): self.model=fits.getdata(fn, ext=2)
             if(np.isin(3, ext_list)): self.resi=fits.getdata(fn, ext=3)
 
-        else:
+        else: ## If the input file has only the result file
             self.header=fits.getheader(fn)
-            path=fn_base_noext+self.header['DATAIN']
+            path=fn_add_front+self.header['DATAIN'] ## Read path
             if(hasattr(replace_folder, "__len__")==True):
                 path=path.replace(replace_folder[0], replace_folder[1])
-            if(np.sum(np.isin([1,3], ext_list))):
+
+            if(np.sum(np.isin([1,3], ext_list))): ## Image, resi
                 self.image=fits.getdata(path)
                 self.header_img=fits.getheader(path)
-            if(np.sum(np.isin([2,3], ext_list))): self.model=fits.getdata(fn)
+            if(np.sum(np.isin([2,3], ext_list))): self.model=fits.getdata(fn) ## Model, resi
             if(np.isin(3, ext_list)): self.resi = self.image - self.model
 
 
@@ -1847,7 +2435,174 @@ def show_FITSimage(fn, ext_data=0, ext_wcs=0, use_zscale=True, use_wcs=True):
         im = ax.imshow(image_data, origin='lower', cmap='bone')
 
 
-class MC2fitDrawing():
+class ResPack():
+    """
+
+    """
+    def __init__(self,
+                 MC2fitSettingClass,
+                 RunlistClass,
+                 DirInfoClass,
+                 **kwargs):
+
+
+        ## Multicore setting
+        self.use_try=True
+        self.Ncore=2
+        self.show_multicore=True
+        self.show_progress=-1
+
+        ## path setting
+        self.proj_folder='galfit_g_base/',
+        self.comp_autoswap=True
+        self.swapmode='N'
+        self.comp_4th_nsc_autoswap=True
+        self.comp_4th_ss_autoswap=False
+        self.chi2_itemlist= ['CHI2NU', 'AIC_F', 'RChi_50', 'AIC_50']
+        self.comp_crit='RChi_50',
+        self.reff_snr_crit=2
+        self.reff_snr_n_cut=2
+        self.re_cut_list=None
+
+        ## Class
+        self.MC2fitSettingClass=MC2fitSettingClass
+        self.RunlistClass=RunlistClass
+        self.DirInfoClass=DirInfoClass
+
+        try: self.__dict__.update(MC2fitSettingClass.__dict__)
+        except: pass
+        self.__dict__.update(kwargs)
+        self._post_init()
+
+#     def _show_multicore_result(self):
+#         Nfailed=np.sum(np.isnan(self.multi_res))
+#         print("======== Multicore result ========")
+#         print("● Succeed: %d / %d"%(np.sum(self.multi_res==0), len(self.DirInfoClass.dir_work_list)))
+#         print("● Failed: %d / %d"%(Nfailed, len(self.DirInfoClass.dir_work_list)))
+#         if(Nfailed>0):
+#             print(">> See where: self.multi_res")
+#             print(">> To debug, use Ncore=1, and use_try = False")
+
+
+    def _post_init(self):
+        if(hasattr(self.re_cut_list, "__len__")==False):
+            self.re_cut_list=np.full(len(self.DirInfoClass.dir_work_list), np.nan)
+        self._getdata()
+
+
+    def _getdata(self):
+        global sub_getdata
+        def sub_getdata(i):
+
+            Res=Result(runlist=self.RunlistClass.runlist,
+                       dir_work=self.DirInfoClass.dir_work_list[i],
+                       **self.__dict__
+                      )
+            fulldat=Res.save_data(fna_output=None, return_array=True)
+            Nfile=np.sum(Res.Data.is_file_exist)
+            if(Nfile==0):
+                bob_index=0
+                bobwarn_index=0
+            else:
+                bob_index=Res.best[0]
+                bobwarn_index=Res.best_warn[0]
+
+            ResBest=ResultBest(Res, include_warn=False, get_single=True, comp_crit=self.comp_crit)
+            best_index=ResBest.bestsubmodels_flat
+
+            ResBestWarn=ResultBest(Res, include_warn=True, get_single=True, comp_crit=self.comp_crit)
+            bestwarn_index=ResBestWarn.bestsubmodels_warn_flat
+
+            return fulldat, int(bob_index), int(bobwarn_index), best_index, bestwarn_index, int(Nfile)
+
+        fulldat, bob_index, bobwarn_index, best_index, bestwarn_index, Nfile = mulcore.multicore_run(
+                                sub_getdata,
+                                len(self.DirInfoClass.dir_work_list),
+                                Ncore=self.Ncore,
+                                use_try=self.use_try,
+                                use_zip=True,
+                                show_progress=self.show_progress,
+                                debug=self.show_multicore,
+                                errorcode=[0,0,0,0,0,0])
+
+        self.fulldat=fulldat #Full data
+        self.groupid_list=np.unique(self.fulldat[0]['group_ID']).astype(int)
+        self.bob_index=np.array(bob_index) #Best of Best - index
+        self.bobwarn_index=np.array(bobwarn_index) #Best of Best - index
+        self.best_index=np.copy(best_index) #Best submodels  - index
+        self.bestwarn_index=np.copy(bestwarn_index) #Best submodels  - index
+
+        self.Nfile=np.array(Nfile) #Number of available files
+
+
+    def generate_onlyval(self, dataarray, index=None):
+        onlyval=np.full(len(dataarray), -1, dtype=dataarray[0].dtype)
+        onlyerr=np.full(len(dataarray), -1, dtype=dataarray[0].dtype)
+
+        for i in range (len(dataarray)):
+            try:
+                thisarray=dataarray[i]
+                vallist=np.where(thisarray['datatype']==1)[0]
+                errlist=np.where(thisarray['datatype']==2)[0]
+
+                if(hasattr(index, "__len__")):
+                    if(np.isnan(index[i])): pass
+                    else:
+                        onlyval[i]=dataarray[i][vallist][int(index[i])]
+                        onlyerr[i]=dataarray[i][errlist][int(index[i])]
+                else:
+                    onlyval[i]=dataarray[i][vallist]
+                    onlyerr[i]=dataarray[i][errlist]
+            except:
+                print("Error ", i)
+        return onlyval, onlyerr
+        ## fulldat, bestdat, bob_index, bob_onlyval, bob_onlyerr, Nfile
+
+    def preset_generate_onlyval(self, submodel=-1, silent=False, is_mag=False):
+        if(submodel==-1): ##best of best
+            if(silent==False): print(">> Get all submodels")
+            self.bob_onlyval, self.bob_onlyerr=self.generate_onlyval(self.fulldat, index=self.bob_index)
+            self.bobwarn_onlyval, self.bobwarn_onlyerr=self.generate_onlyval(self.fulldat, index=self.bobwarn_index)
+        else:
+            if(silent==False): print(">> Get submodels : ", self.groupid_list[submodel])
+            temp1, temp2=self.generate_onlyval(self.fulldat, index=self.best_index[:,submodel])
+            setattr(self, 'sub'+str(submodel)+"_onlyval", temp1)
+            setattr(self, 'sub'+str(submodel)+"_onlyerr", temp2)
+            temp3, temp4=self.generate_onlyval(self.fulldat, index=self.bestwarn_index[:,submodel])
+            setattr(self, 'sub'+str(submodel)+"warn_onlyval", temp3)
+            setattr(self, 'sub'+str(submodel)+"warn_onlyerr", temp4)
+            self.thismodel_onlyval=temp1
+            self.thismodel_onlyerr=temp2
+            self.thismodelwarn_onlyval=temp3
+            self.thismodelwarn_onlyerr=temp4
+            #self.thismodel_onlyval, self.thismodel_onlyerr=self.generate_onlyval(self.fulldat, index=self.best_index[:,submodel])
+            #self.thismodelwarn_onlyval, self.thismodelwarn_onlyerr=self.generate_onlyval(self.fulldat, index=self.bestwarn_index[:,submodel])
+        self._get_add_params_array(submodel, is_mag=is_mag)
+
+    def _get_add_params_array(self, submodel=-1, is_mag=False):
+        if(submodel==-1): ##best of best
+            self.is_sersic, self.add_params1_array, self.add_params2_array, self.add_params3_array\
+            = convert_add_params_array(self.bob_onlyval, is_mag=is_mag)
+            self.add_params_array=np.stack((self.add_params1_array, self.add_params2_array, self.add_params3_array), axis=1)
+
+            self.is_sersic_warn, self.addwarn_params1_array, self.addwarn_params2_array, self.addwarn_params3_array\
+            = convert_add_params_array(self.bobwarn_onlyval, is_mag=is_mag)
+            self.addwarn_params_array=np.stack((self.addwarn_params1_array, self.addwarn_params2_array, self.addwarn_params3_array), axis=1)
+
+        else:
+            self.thismodel_is_sersic, self.thismodel_add_params1_array, self.thismodel_add_params2_array, self.thismodel_add_params3_array\
+            = convert_add_params_array(self.thismodel_onlyval, is_mag=is_mag)
+            self.thismodel_add_params_array=np.stack((self.thismodel_add_params1_array, self.thismodel_add_params2_array, self.thismodel_add_params3_array), axis=1)
+
+            self.thismodelwarn_is_sersic, self.thismodelwarn_add_params1_array, self.thismodelwarn_add_params2_array, self.thismodelwarn_add_params3_array\
+            = convert_add_params_array(self.thismodelwarn_onlyval, is_mag=is_mag)
+            self.thismodelwarn_add_params_array=np.stack((self.thismodelwarn_add_params1_array, self.thismodelwarn_add_params2_array, self.thismodelwarn_add_params3_array), axis=1)
+
+
+
+
+
+class Drawing():
     """
 
     """
@@ -1875,7 +2630,7 @@ class MC2fitDrawing():
         self.log_image_offset=50
 
         ## ReadGalfitData
-        self.fn_base_noext=''
+        self.fn_add_front=''
         self.replace_folder=None
 
         ## Masking
@@ -1920,7 +2675,7 @@ class MC2fitDrawing():
             else: self.gs=gridspec.GridSpec(1,1)
 
         ## File open
-        self.Gdat=ReadGalfitData(self.fn, fn_base_noext=self.fn_base_noext, replace_folder=self.replace_folder)
+        self.Gdat=ReadGalfitData(self.fn, fn_add_front=self.fn_add_front, replace_folder=self.replace_folder)
 
         ## Masking file
         if(self.fn_masking!=None): self.masking=fits.getdata(self.fn_masking)
