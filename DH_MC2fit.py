@@ -1501,14 +1501,16 @@ class Result():
     def _input(self):
         if(self.silent==False): print("=========== Run ResultGalfit ===========\n")
         ## INPUT 1) Runlist
-        if(hasattr(self.RunlistClass, "runlist")):  ## If runlist is not empty, use runlist
-            if(hasattr(self.RunlistClass.runlist, "__len__")):  ## If runlist is not empty, use runlist
-                self._input_runlist(runlist=self.RunlistClass.runlist,
-                                    group_id=self.group_id,
-                                    dir_work=self.dir_work_proj)
+        try:
+            if(hasattr(self.RunlistClass, "runlist")):  ## If runlist is not empty, use runlist
+                if(hasattr(self.RunlistClass.runlist, "__len__")):  ## If runlist is not empty, use runlist
+                    self._input_runlist(runlist=self.RunlistClass.runlist,
+                                        group_id=self.group_id,
+                                        dir_work=self.dir_work_proj)
+        except:
         ## INPUT 2) Manual
-        if(hasattr(self.fnlist, "__len__")):   ## If fnlist is not empty, use fnlist
-            self._input_manual(fnlist=self.fnlist, namelist=self.namelist)
+            if(hasattr(self.fnlist, "__len__")):   ## If fnlist is not empty, use fnlist
+                self._input_manual(fnlist=self.fnlist, namelist=self.namelist)
 
         if(self.input_only): return
 
@@ -2291,6 +2293,8 @@ class PostProcessing_Mulcore():
         self.Ncore=2
         self.show_multicore=True
         self.show_progress=-1
+        self.chi2_radius_array=[-1, 50]
+        self.chi_item_namelist=['F', '50']
 
         ## Class
         self.MC2fitSettingClass=MC2fitSettingClass
@@ -2316,6 +2320,12 @@ class PostProcessing_Mulcore():
 
 
     def _post_init(self):
+
+        self.chi2_radius_array=np.array(self.chi2_radius_array)
+        if(np.ndim(self.chi2_radius_array)==1):
+            self.chi2_radius_array=np.repeat(np.array([self.chi2_radius_array]),
+                                             len(self.DirInfoClass.dir_work_list),
+                                             axis=0)
 #         self.plate_scale=dharray.value_repeat_array(self.plate_scale, 2)
 #         self.image_size=dharray.value_repeat_array(self.image_size, 2)
 #         if(hasattr(self.chi2_radius_list, "__len__")==False): ## Const
@@ -2352,6 +2362,7 @@ class PostProcessing_Mulcore():
 #                                 overwrite=overwrite, silent=silent, print_galfit=print_galfit)
 
             PostProcessing(dir_work=dir_work,
+            chi2_radius_list=self.chi2_radius_array[i],
                       **self.__dict__
                      )
 
@@ -2435,6 +2446,82 @@ def show_FITSimage(fn, ext_data=0, ext_wcs=0, use_zscale=True, use_wcs=True):
         im = ax.imshow(image_data, origin='lower', cmap='bone')
 
 
+class ExtractFits():
+    """
+
+    """
+    def __init__(self,
+                 MC2fitSettingClass,
+                 DirInfoClass,
+                 proj_folder='',
+                 fni='output*',
+                 prev_pattern='output',
+                 new_pattern='result',
+                 extract_ext=2,
+                 **kwargs):
+
+        ## Multicore setting
+        self.use_try=True
+        self.Ncore=2
+        self.show_multicore=True
+        self.show_progress=-1
+
+        ## Additional parameters
+        self.fni=fni
+        self.proj_folder=proj_folder
+        self.prev_pattern=prev_pattern
+        self.new_pattern=new_pattern
+        self.extract_ext=extract_ext
+
+        ## Class
+        self.MC2fitSettingClass=MC2fitSettingClass
+        self.DirInfoClass=DirInfoClass
+
+        try: self.__dict__.update(MC2fitSettingClass.__dict__)
+        except: pass
+        self.__dict__.update(kwargs)
+        self._post_init()
+        if(self.Ncore!=1):
+            self._show_multicore_result()
+
+
+    def _show_multicore_result(self):
+        Nfailed=np.sum(np.isnan(self.multi_res))
+        print("======== Multicore result ========")
+        print("● Succeed: %d / %d"%(np.sum(self.multi_res==0), len(self.DirInfoClass.dir_work_list)))
+        print("● Failed: %d / %d"%(Nfailed, len(self.DirInfoClass.dir_work_list)))
+        if(Nfailed>0):
+            print(">> See where: self.multi_res")
+            print(">> To debug, use Ncore=1, and use_try = False")
+
+    def _post_init(self):
+        self.extract_ext=int(self.extract_ext)
+
+        global sub_run_process
+
+        def sub_run_process(i):
+
+            dir_work=self.DirInfoClass.dir_work_list[i]
+            existlist1=glob.glob(dir_work+self.proj_folder+self.fni)
+            if(len(existlist1)!=0):
+                newfnlist=np.core.defchararray.replace(existlist1, self.prev_pattern, self.new_pattern)
+                for j, fn in enumerate(existlist1):
+                    newfn=newfnlist[j]
+                    fits.writeto(newfn, fits.getdata(fn, self.extract_ext), fits.getheader(fn, self.extract_ext),
+                    overwrite=True, output_verify='silentfix')
+            return 0
+
+
+        self.multi_res=mulcore.multicore_run(sub_run_process,
+                                             len(self.DirInfoClass.dir_work_list),
+                                             Ncore=self.Ncore,
+                                             use_try=self.use_try,
+                                             show_progress=self.show_progress,
+                                             debug=self.show_multicore)
+        self.multi_res=np.array(self.multi_res)
+
+
+
 class ResPack():
     """
 
@@ -2459,7 +2546,7 @@ class ResPack():
         self.comp_4th_nsc_autoswap=True
         self.comp_4th_ss_autoswap=False
         self.chi2_itemlist= ['CHI2NU', 'AIC_F', 'RChi_50', 'AIC_50']
-        self.comp_crit='RChi_50',
+        self.comp_crit='AIC_50',
         self.reff_snr_crit=2
         self.reff_snr_n_cut=2
         self.re_cut_list=None
