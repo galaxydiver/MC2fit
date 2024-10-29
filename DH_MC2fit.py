@@ -303,6 +303,86 @@ class Runlist():
 
         display(pd.DataFrame(res))
 
+class RunlistForBest():
+
+    def __init__(self,
+                 MC2fitSettingClass,
+                 RunlistClass,
+                 ResPackClass,
+                 **kwargs):
+
+        ## default setting
+        self.namelist=None
+        self.MC2fitSettingClass=MC2fitSettingClass
+        self.RunlistClass=RunlistClass
+        self.ResPackClass=ResPackClass
+
+        try: self.__dict__.update(MC2fitSettingClass.__dict__)
+        except: pass
+        self.__dict__.update(kwargs)
+        self._post_init()
+
+
+
+
+    def _post_init(self):
+        self.group_list = np.unique(self.RunlistClass.runlist['group_ID'])
+        self.Ngroup = len(self.group_list)
+        if(hasattr(self.namelist, "__len__")==False):
+            self.namelist = dharray.array_attach_string(np.arange(self.Ngroup), 'rr_', add_at_head=True)
+        self._make_runlist()
+
+    def _make_runlist(self):
+        self.Runlist_set=np.zeros(self.Ngroup, dtype=object)
+        self.Runlist_warn_set=np.zeros(self.Ngroup, dtype=object)
+        self.Ncomp_list=np.zeros(self.Ngroup, dtype=int)
+
+        for i, group in enumerate(self.group_list):
+            thisrunlist=self.RunlistClass.runlist[self.RunlistClass.runlist['group_ID']==group][0]
+            self.Ncomp_list[i]=len(thisrunlist['complist'])
+
+            self.Runlist_set[i]=Runlist(self.MC2fitSettingClass, namelist=[self.namelist[i]],
+                                        complist=thisrunlist['complist'],
+                                        est_params_array=np.array([[0, 0, 0, 0, 0, 0, 0]]*self.Ncomp_list[i], dtype='object'), ## This will be added --> All values = 0
+                                        group_id=thisrunlist['group_ID']*10,
+                                        size_conv=thisrunlist['size_conv'],
+                                        lim_params_array=thisrunlist['lim_params']
+                                       )
+
+            if(i==0): self.Runlist_all=copy.deepcopy(self.Runlist_set[i])
+            else: self.Runlist_all.add_runlist(self.Runlist_set[i])
+
+            self.Runlist_warn_set[i]=copy.deepcopy(self.Runlist_set[i])
+            self.Runlist_warn_set[i].runlist['name']=dharray.array_attach_string(self.Runlist_warn_set[i].runlist['name'], 'w')
+            self.Runlist_warn_set[i].runlist['group_ID']+=1
+            self.Runlist_all.add_runlist(self.Runlist_warn_set[i])
+
+    def run_runlist(self, DirInfoClass):
+        for i in range (len(self.Runlist_set)):
+            print ("\n\n===============================")
+            print ("Stage", i)
+            self.ResPackClass.preset_generate_onlyval(submodel=i)
+
+            using_params_array=self.ResPackClass.thismodel_add_params_array
+            using_params_array_warn=self.ResPackClass.thismodelwarn_add_params_array
+
+            skiplist=np.isnan(self.ResPackClass.best_index)[:,i]
+            Run=MC2fitRun_Mulcore(self.MC2fitSettingClass, self.Runlist_set[i], DirInfoClass,
+                                  Ncomp_add_params_array=self.Ncomp_list[i],
+                                  add_params_array_set=using_params_array,
+                                  skiplist=skiplist,
+                                 )
+            ## Warn
+            skiplist=np.isnan(self.ResPackClass.bestwarn_index[:,i]) | (self.ResPackClass.bestwarn_index[:,i]==self.ResPackClass.best_index[:,i]) ## Nan or same with the previous
+
+            Run=MC2fitRun_Mulcore(self.MC2fitSettingClass, self.Runlist_warn_set[i], DirInfoClass,
+                                  Ncomp_add_params_array=self.Ncomp_list[i],
+                                  add_params_array_set=using_params_array_warn,
+                                  skiplist=skiplist,
+                                 )
+
+
+
 class PyGalfit():
     """
     Automatically run Galfit with input presets
