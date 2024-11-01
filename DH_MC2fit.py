@@ -2604,8 +2604,222 @@ class ExtractFits():
         self.multi_res=np.array(self.multi_res)
 
 
-
 class ResPack():
+    """
+
+    """
+    def __init__(self,
+                 MC2fitSettingClass,
+                 RunlistClass,
+                 DirInfoClass,
+                 **kwargs):
+
+
+        ## Multicore setting
+        self.use_try=True
+        self.Ncore=2
+        self.show_multicore=True
+        self.show_progress=-1
+
+        ## path setting
+        self.proj_folder='galfit_g_base/',
+        self.comp_autoswap=True
+        self.swapmode='N'
+        self.comp_4th_nsc_autoswap=True
+        self.comp_4th_ss_autoswap=False
+        self.chi2_itemlist= ['CHI2NU', 'AIC_F', 'RChi_50', 'AIC_50']
+        self.comp_crit='AIC_50',
+        self.reff_snr_crit=2
+        self.reff_snr_n_cut=2
+        self.re_cut_list=None
+
+
+        ## Class
+        self.MC2fitSettingClass=MC2fitSettingClass
+        self.RunlistClass=RunlistClass
+        self.DirInfoClass=DirInfoClass
+
+        try: self.__dict__.update(MC2fitSettingClass.__dict__)
+        except: pass
+        self.__dict__.update(kwargs)
+        self._post_init()
+
+#     def _show_multicore_result(self):
+#         Nfailed=np.sum(np.isnan(self.multi_res))
+#         print("======== Multicore result ========")
+#         print("● Succeed: %d / %d"%(np.sum(self.multi_res==0), len(self.DirInfoClass.dir_work_list)))
+#         print("● Failed: %d / %d"%(Nfailed, len(self.DirInfoClass.dir_work_list)))
+#         if(Nfailed>0):
+#             print(">> See where: self.multi_res")
+#             print(">> To debug, use Ncore=1, and use_try = False")
+
+
+    def _post_init(self):
+        if(hasattr(self.re_cut_list, "__len__")==False):
+            self.re_cut_list=np.full(len(self.DirInfoClass.dir_work_list), np.nan)
+        self._getdata()
+
+
+    def _getdata(self):
+        global sub_getdata
+        def sub_getdata(i):
+
+            Res=Result(runlist=self.RunlistClass.runlist,
+                       dir_work=self.DirInfoClass.dir_work_list[i],
+                       **self.__dict__
+                      )
+            fulldat=Res.save_data(fna_output=None, return_array=True)
+            Nfile=np.sum(Res.Data.is_file_exist)
+            if(Nfile==0):
+                bob_index=0
+                bobwarn_index=0
+            else:
+                bob_index=Res.best[0]
+                bobwarn_index=Res.best_warn[0]
+
+            ResBest=ResultBest(Res, include_warn=False, get_single=True, comp_crit=self.comp_crit)
+            best_index=ResBest.bestsubmodels_flat
+
+            ResBestWarn=ResultBest(Res, include_warn=True, get_single=True, comp_crit=self.comp_crit)
+            bestwarn_index=ResBestWarn.bestsubmodels_warn_flat
+
+            return fulldat, int(bob_index), int(bobwarn_index), best_index, bestwarn_index, int(Nfile)
+
+        self.raw_output = mulcore.multicore_run(
+                                sub_getdata,
+                                len(self.DirInfoClass.dir_work_list),
+                                Ncore=self.Ncore,
+                                use_try=self.use_try,
+                                use_zip=True,
+                                show_progress=self.show_progress,
+                                debug=self.show_multicore,
+                                errorcode=[-1]*6)
+
+        if(self.silent==False):
+            print("======== output ========")
+            print(self.raw_output)
+        if(self.Ncore==1):
+            fulldat=np.zeros(len(self.raw_output), dtype=object)
+            bob_index=np.zeros(len(self.raw_output), dtype=object)
+            bobwarn_index=np.zeros(len(self.raw_output), dtype=object)
+            best_index=np.zeros(len(self.raw_output), dtype=object)
+            bestwarn_index=np.zeros(len(self.raw_output), dtype=object)
+            Nfile=np.zeros(len(self.raw_output), dtype=object)
+            for i in range (len(self.raw_output)):
+                fulldat[i]=self.raw_output[i][0]
+                bob_index[i]=self.raw_output[i][1]
+                bobwarn_index[i]=self.raw_output[i][2]
+                best_index[i]=self.raw_output[i][3]
+                bestwarn_index[i]=self.raw_output[i][4]
+                Nfile[i]=self.raw_output[i][5]
+            best_index=np.stack((best_index))
+            bestwarn_index=np.stack((bestwarn_index))
+
+
+        else: fulldat, bob_index, bobwarn_index, best_index, bestwarn_index, Nfile = self.raw_output
+
+        self.fulldat=fulldat #Full data
+        self.groupid_list=np.unique(self.fulldat[0]['group_ID']).astype(int)
+        self.bob_index=np.array(bob_index) #Best of Best - index
+        self.bobwarn_index=np.array(bobwarn_index) #Best of Best - index
+        self.best_index=np.copy(best_index) #Best submodels  - index
+        self.bestwarn_index=np.copy(bestwarn_index) #Best submodels  - index
+
+        self.Nfile=np.array(Nfile) #Number of available files
+
+
+
+    def _generate_onlyval(self, dataarray, index=None):
+        """
+        fulldata -> onlyval, onlyerr,
+        """
+        onlyval=np.full(len(dataarray), -1, dtype=dataarray[0].dtype)
+        onlyerr=np.full(len(dataarray), -1, dtype=dataarray[0].dtype)
+
+        for i in range (len(dataarray)):
+            try:
+                thisarray=dataarray[i]
+                vallist=np.where(thisarray['datatype']==1)[0] ## value
+                errlist=np.where(thisarray['datatype']==2)[0] ## error
+
+                if(hasattr(index, "__len__")):
+                    if(np.isnan(index[i])): pass
+                    else:
+                        onlyval[i]=dataarray[i][vallist][int(index[i])]
+                        onlyerr[i]=dataarray[i][errlist][int(index[i])]
+                else:
+                    onlyval[i]=dataarray[i][vallist]
+                    onlyerr[i]=dataarray[i][errlist]
+            except:
+                print("Error ", i)
+        return onlyval, onlyerr
+        ## fulldat, bestdat, bob_index, bob_onlyval, bob_onlyerr, Nfile
+
+
+    def preset_generate_onlyval(self, submodel=-1, silent=False, is_mag=False):
+        if(submodel==-1): ##best of best
+            if(silent==False): print(">> Get all submodels")
+            self.bob_onlyval, self.bob_onlyerr=self._generate_onlyval(self.fulldat, index=self.bob_index)
+            self.bobwarn_onlyval, self.bobwarn_onlyerr=self._generate_onlyval(self.fulldat, index=self.bobwarn_index)
+        else:
+            try: i_group=np.where(self.groupid_list==submodel)[0][0]
+            except: print(">> Error! No corresponding group ID")
+            if(silent==False):
+                print(">> Get submodels: ", submodel)
+                print(">> Group index: ", i_group)
+
+            temp1, temp2=self._generate_onlyval(self.fulldat, index=self.best_index[:,i_group])
+            setattr(self, 'sub'+str(submodel)+"_onlyval", temp1)
+            setattr(self, 'sub'+str(submodel)+"_onlyerr", temp2)
+            temp3, temp4=self._generate_onlyval(self.fulldat, index=self.bestwarn_index[:,i_group])
+            setattr(self, 'sub'+str(submodel)+"warn_onlyval", temp3)
+            setattr(self, 'sub'+str(submodel)+"warn_onlyerr", temp4)
+            self.thismodel_onlyval=temp1
+            self.thismodel_onlyerr=temp2
+            self.thismodelwarn_onlyval=temp3
+            self.thismodelwarn_onlyerr=temp4
+            #self.thismodel_onlyval, self.thismodel_onlyerr=self._generate_onlyval(self.fulldat, index=self.best_index[:,submodel])
+            #self.thismodelwarn_onlyval, self.thismodelwarn_onlyerr=self._generate_onlyval(self.fulldat, index=self.bestwarn_index[:,submodel])
+        self._get_params_array(submodel, is_mag=is_mag)
+
+    def _get_params_array(self, submodel=-1, is_mag=False):
+        if(submodel==-1): ##best of best
+            self.params_array = self._convert_params_array(self.bob_onlyval, is_mag=is_mag)
+            self.params_warn_array = self._convert_params_array(self.bobwarn_onlyval, is_mag=is_mag)
+        else:
+            self.thismodel_params_array = self._convert_params_array(self.thismodel_onlyval, is_mag=is_mag)
+            self.thismodel_params_warn_array = self._convert_params_array(self.thismodelwarn_onlyval, is_mag=is_mag)
+
+
+    def _convert_params_array(self, usingdat, Ncomp_max=20, is_mag=False):
+        """
+
+        """
+        if(is_mag): item = ['XC', 'YC', 'MAG', 'RE', 'N', 'AR', 'PA']
+        else: item = ['XC', 'YC', 'MU_E', 'RE', 'N', 'AR', 'PA']
+
+
+        ## Comp, Dat, Params
+        params_array=np.zeros((Ncomp_max, len(usingdat), 7))
+        for i in range(2, Ncomp_max):
+            head=str(i)+"_"
+            thiscompitem=dharray.array_attach_string(item, head, add_at_head=True)
+            if(np.isin(thiscompitem[0], usingdat.dtype.names)): ## If it has item
+                for j in range (len(item)):
+                    params_array[i,:,j]=usingdat[thiscompitem[j]]
+
+                ## if the data has not N --> it might be PSF
+                is_psf=np.isfinite(params_array[i,:,0]) &  np.isnan(params_array[i,:,4])
+                params_array[i,is_psf,2]=usingdat[is_psf][thiscompitem[2]] ## Mag copy
+            else: break
+
+        Ncomp_max=i
+        params_array=params_array[2:Ncomp_max]
+
+        return params_array
+
+
+class ResPack_old():
     """
 
     """
@@ -3275,230 +3489,3 @@ def convert_add_params_array(usingdat, is_mag=False):
         is_psf2=np.isfinite(add_params3_array[:,0]) &  np.isnan(add_params3_array[:,4])
         add_params3_array[is_psf2,2]=usingdat[is_psf2]['4_MAG'] # Mu_e = mag
     return is_sersic, add_params1_array, add_params2_array, add_params3_array
-
-
-class ResPack2():
-    """
-
-    """
-    def __init__(self,
-                 MC2fitSettingClass,
-                 RunlistClass,
-                 DirInfoClass,
-                 **kwargs):
-
-
-        ## Multicore setting
-        self.use_try=True
-        self.Ncore=2
-        self.show_multicore=True
-        self.show_progress=-1
-
-        ## path setting
-        self.proj_folder='galfit_g_base/',
-        self.comp_autoswap=True
-        self.swapmode='N'
-        self.comp_4th_nsc_autoswap=True
-        self.comp_4th_ss_autoswap=False
-        self.chi2_itemlist= ['CHI2NU', 'AIC_F', 'RChi_50', 'AIC_50']
-        self.comp_crit='AIC_50',
-        self.reff_snr_crit=2
-        self.reff_snr_n_cut=2
-        self.re_cut_list=None
-
-
-        ## Class
-        self.MC2fitSettingClass=MC2fitSettingClass
-        self.RunlistClass=RunlistClass
-        self.DirInfoClass=DirInfoClass
-
-        try: self.__dict__.update(MC2fitSettingClass.__dict__)
-        except: pass
-        self.__dict__.update(kwargs)
-        self._post_init()
-
-#     def _show_multicore_result(self):
-#         Nfailed=np.sum(np.isnan(self.multi_res))
-#         print("======== Multicore result ========")
-#         print("● Succeed: %d / %d"%(np.sum(self.multi_res==0), len(self.DirInfoClass.dir_work_list)))
-#         print("● Failed: %d / %d"%(Nfailed, len(self.DirInfoClass.dir_work_list)))
-#         if(Nfailed>0):
-#             print(">> See where: self.multi_res")
-#             print(">> To debug, use Ncore=1, and use_try = False")
-
-
-    def _post_init(self):
-        if(hasattr(self.re_cut_list, "__len__")==False):
-            self.re_cut_list=np.full(len(self.DirInfoClass.dir_work_list), np.nan)
-        self._getdata()
-
-
-    def _getdata(self):
-        global sub_getdata
-        def sub_getdata(i):
-
-            Res=dhmc2fit.Result(runlist=self.RunlistClass.runlist,
-                       dir_work=self.DirInfoClass.dir_work_list[i],
-                       **self.__dict__
-                      )
-            fulldat=Res.save_data(fna_output=None, return_array=True)
-            Nfile=np.sum(Res.Data.is_file_exist)
-            if(Nfile==0):
-                bob_index=0
-                bobwarn_index=0
-            else:
-                bob_index=Res.best[0]
-                bobwarn_index=Res.best_warn[0]
-
-            ResBest=dhmc2fit.ResultBest(Res, include_warn=False, get_single=True, comp_crit=self.comp_crit)
-            best_index=ResBest.bestsubmodels_flat
-
-            ResBestWarn=dhmc2fit.ResultBest(Res, include_warn=True, get_single=True, comp_crit=self.comp_crit)
-            bestwarn_index=ResBestWarn.bestsubmodels_warn_flat
-
-            return fulldat, int(bob_index), int(bobwarn_index), best_index, bestwarn_index, int(Nfile)
-
-        self.raw_output = mulcore.multicore_run(
-                                sub_getdata,
-                                len(self.DirInfoClass.dir_work_list),
-                                Ncore=self.Ncore,
-                                use_try=self.use_try,
-                                use_zip=True,
-                                show_progress=self.show_progress,
-                                debug=self.show_multicore,
-                                errorcode=[-1]*6)
-
-        if(self.silent==False):
-            print("======== output ========")
-            print(self.raw_output)
-        if(self.Ncore==1):
-            fulldat=np.zeros(len(self.raw_output), dtype=object)
-            bob_index=np.zeros(len(self.raw_output), dtype=object)
-            bobwarn_index=np.zeros(len(self.raw_output), dtype=object)
-            best_index=np.zeros(len(self.raw_output), dtype=object)
-            bestwarn_index=np.zeros(len(self.raw_output), dtype=object)
-            Nfile=np.zeros(len(self.raw_output), dtype=object)
-            for i in range (len(self.raw_output)):
-                fulldat[i]=self.raw_output[i][0]
-                bob_index[i]=self.raw_output[i][1]
-                bobwarn_index[i]=self.raw_output[i][2]
-                best_index[i]=self.raw_output[i][3]
-                bestwarn_index[i]=self.raw_output[i][4]
-                Nfile[i]=self.raw_output[i][5]
-            best_index=np.stack((best_index))
-            bestwarn_index=np.stack((bestwarn_index))
-
-
-        else: fulldat, bob_index, bobwarn_index, best_index, bestwarn_index, Nfile = self.raw_output
-
-        self.fulldat=fulldat #Full data
-        self.groupid_list=np.unique(self.fulldat[0]['group_ID']).astype(int)
-        self.bob_index=np.array(bob_index) #Best of Best - index
-        self.bobwarn_index=np.array(bobwarn_index) #Best of Best - index
-        self.best_index=np.copy(best_index) #Best submodels  - index
-        self.bestwarn_index=np.copy(bestwarn_index) #Best submodels  - index
-
-        self.Nfile=np.array(Nfile) #Number of available files
-
-
-
-    def _generate_onlyval(self, dataarray, index=None):
-        """
-        fulldata -> onlyval, onlyerr,
-        """
-        onlyval=np.full(len(dataarray), -1, dtype=dataarray[0].dtype)
-        onlyerr=np.full(len(dataarray), -1, dtype=dataarray[0].dtype)
-
-        for i in range (len(dataarray)):
-            try:
-                thisarray=dataarray[i]
-                vallist=np.where(thisarray['datatype']==1)[0] ## value
-                errlist=np.where(thisarray['datatype']==2)[0] ## error
-
-                if(hasattr(index, "__len__")):
-                    if(np.isnan(index[i])): pass
-                    else:
-                        onlyval[i]=dataarray[i][vallist][int(index[i])]
-                        onlyerr[i]=dataarray[i][errlist][int(index[i])]
-                else:
-                    onlyval[i]=dataarray[i][vallist]
-                    onlyerr[i]=dataarray[i][errlist]
-            except:
-                print("Error ", i)
-        return onlyval, onlyerr
-        ## fulldat, bestdat, bob_index, bob_onlyval, bob_onlyerr, Nfile
-
-
-    def preset_generate_onlyval(self, submodel=-1, silent=False, is_mag=False):
-        if(submodel==-1): ##best of best
-            if(silent==False): print(">> Get all submodels")
-            self.bob_onlyval, self.bob_onlyerr=self._generate_onlyval(self.fulldat, index=self.bob_index)
-            self.bobwarn_onlyval, self.bobwarn_onlyerr=self._generate_onlyval(self.fulldat, index=self.bobwarn_index)
-        else:
-            try: i_group=np.where(self.groupid_list==submodel)[0][0]
-            except: print(">> Error! No corresponding group ID")
-            if(silent==False):
-                print(">> Get submodels: ", submodel)
-                print(">> Group index: ", i_group)
-
-            temp1, temp2=self._generate_onlyval(self.fulldat, index=self.best_index[:,i_group])
-            setattr(self, 'sub'+str(submodel)+"_onlyval", temp1)
-            setattr(self, 'sub'+str(submodel)+"_onlyerr", temp2)
-            temp3, temp4=self._generate_onlyval(self.fulldat, index=self.bestwarn_index[:,i_group])
-            setattr(self, 'sub'+str(submodel)+"warn_onlyval", temp3)
-            setattr(self, 'sub'+str(submodel)+"warn_onlyerr", temp4)
-            self.thismodel_onlyval=temp1
-            self.thismodel_onlyerr=temp2
-            self.thismodelwarn_onlyval=temp3
-            self.thismodelwarn_onlyerr=temp4
-            #self.thismodel_onlyval, self.thismodel_onlyerr=self._generate_onlyval(self.fulldat, index=self.best_index[:,submodel])
-            #self.thismodelwarn_onlyval, self.thismodelwarn_onlyerr=self._generate_onlyval(self.fulldat, index=self.bestwarn_index[:,submodel])
-        self._get_params_array(submodel, is_mag=is_mag)
-
-    def _get_params_array(self, submodel=-1, is_mag=False):
-        if(submodel==-1): ##best of best
-            self.is_sersic, self.add_params1_array, self.add_params2_array, self.add_params3_array\
-            = self._convert_params_array(self.bob_onlyval, is_mag=is_mag)
-            self.add_params_array=np.stack((self.add_params1_array, self.add_params2_array, self.add_params3_array), axis=1)
-
-            self.is_sersic_warn, self.addwarn_params1_array, self.addwarn_params2_array, self.addwarn_params3_array\
-            = self._convert_params_array(self.bobwarn_onlyval, is_mag=is_mag)
-            self.addwarn_params_array=np.stack((self.addwarn_params1_array, self.addwarn_params2_array, self.addwarn_params3_array), axis=1)
-
-        else:
-            self.thismodel_is_sersic, self.thismodel_add_params1_array, self.thismodel_add_params2_array, self.thismodel_add_params3_array\
-            = self._convert_params_array(self.thismodel_onlyval, is_mag=is_mag)
-            self.thismodel_add_params_array=np.stack((self.thismodel_add_params1_array, self.thismodel_add_params2_array, self.thismodel_add_params3_array), axis=1)
-
-            self.thismodelwarn_is_sersic, self.thismodelwarn_add_params1_array, self.thismodelwarn_add_params2_array, self.thismodelwarn_add_params3_array\
-            = self._convert_params_array(self.thismodelwarn_onlyval, is_mag=is_mag)
-            self.thismodelwarn_add_params_array=np.stack((self.thismodelwarn_add_params1_array, self.thismodelwarn_add_params2_array, self.thismodelwarn_add_params3_array), axis=1)
-
-
-    def _convert_params_array(self, usingdat, is_mag=False):
-        """
-
-        """
-        if(is_mag): comp=['XC', 'YC', 'MAG', 'RE', 'N', 'AR', 'PA']
-        else: comp=['XC', 'YC', 'MU_E', 'RE', 'N', 'AR', 'PA']
-
-        comp2=dharray.array_attach_string(comp, '2_', add_at_head=True)
-        comp3=dharray.array_attach_string(comp, '3_', add_at_head=True)
-        comp4=dharray.array_attach_string(comp, '4_', add_at_head=True)
-        add_params1_array=np.full((len(usingdat),7), np.nan)
-        add_params2_array=np.full((len(usingdat),7), np.nan)
-        add_params3_array=np.full((len(usingdat),7), np.nan)
-        is_3rd_comp=np.isin(['4_XC'], usingdat.dtype.names)[0]
-        for i in range (len(comp)):
-            add_params1_array[:,i]=usingdat[comp2[i]]
-            add_params2_array[:,i]=usingdat[comp3[i]]
-            if(is_3rd_comp): add_params3_array[:,i]=usingdat[comp4[i]]
-
-        ## For 3rd comp, if the data has not N --> it might be PSF
-        is_psf=np.isfinite(add_params2_array[:,0]) &  np.isnan(add_params2_array[:,4])
-        is_sersic=np.isfinite(add_params2_array[:,0]) &  np.isfinite(add_params2_array[:,4])
-        add_params2_array[is_psf,2]=usingdat[is_psf]['3_MAG'] # Mu_e = mag
-        if(is_3rd_comp):
-            is_psf2=np.isfinite(add_params3_array[:,0]) &  np.isnan(add_params3_array[:,4])
-            add_params3_array[is_psf2,2]=usingdat[is_psf2]['4_MAG'] # Mu_e = mag
-        return is_sersic, add_params1_array, add_params2_array, add_params3_array
