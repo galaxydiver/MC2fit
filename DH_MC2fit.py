@@ -2800,21 +2800,21 @@ class ResPack():
 
 
         ## Comp, Dat, Params
-        params_array=np.zeros((Ncomp_max, len(usingdat), 7))
+        params_array=np.zeros((len(usingdat), Ncomp_max, 7))
         for i in range(2, Ncomp_max):
             head=str(i)+"_"
             thiscompitem=dharray.array_attach_string(item, head, add_at_head=True)
             if(np.isin(thiscompitem[0], usingdat.dtype.names)): ## If it has item
                 for j in range (len(item)):
-                    params_array[i,:,j]=usingdat[thiscompitem[j]]
+                    params_array[:,i,j]=usingdat[thiscompitem[j]]
 
                 ## if the data has not N --> it might be PSF
-                is_psf=np.isfinite(params_array[i,:,0]) &  np.isnan(params_array[i,:,4])
-                params_array[i,is_psf,2]=usingdat[is_psf][thiscompitem[2]] ## Mag copy
+                is_psf=np.isfinite(params_array[:,i,0]) &  np.isnan(params_array[:,i,4])
+                params_array[is_psf,i,2]=usingdat[is_psf][thiscompitem[2]] ## Mag copy
             else: break
 
         Ncomp_max=i
-        params_array=params_array[2:Ncomp_max]
+        params_array=params_array[:,2:Ncomp_max]
 
         return params_array
 
