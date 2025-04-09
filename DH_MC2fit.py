@@ -46,6 +46,7 @@ class Setting:
     ## Info
         band:           str = 'g'
         est_sky:        float = 0 ## estimated sky value [ADU]
+        use_sky_grad:   bool = False ## If True, use sky gradient.
         zeromag:        float = 22.5 ## Photometric zeropoint MAG=-2.5*log(data)+zeromag
         plate_scale:    float = 0.2 ## Input float or array (dx, dy). [arcsec / pix]
         image_size:     int = 500 ## Input int or array (x, y). [pixel]
@@ -76,6 +77,7 @@ class Setting:
     ## Info
     band:           str = 'g'
     est_sky:        float = 0 ## estimated sky value [ADU]
+    use_sky_grad:   bool = False  ## If True, use sky gradient
     zeromag:        float = 22.5 ## Photometric zeropoint MAG=-2.5*log(data)+zeromag
     plate_scale:    float = 0.2 ## Input float or array (dx, dy). [arcsec / pix]
     image_size:     int = 500 ## Input int or array (x, y). [pixel]
@@ -172,7 +174,6 @@ class Runlist():
         self.group_id = 0   ## Fitting group
         self.size_conv = 101  ## Convolution box size
         self.size_fitting = -1
-
 
         try: self.__dict__.update(MC2fitSettingClass.__dict__)
         except: pass
@@ -323,8 +324,6 @@ class RunlistForBest():
         self._post_init()
 
 
-
-
     def _post_init(self):
         self.group_list = np.unique(self.RunlistClass.runlist['group_ID'])
         self.Ngroup = len(self.group_list)
@@ -363,8 +362,8 @@ class RunlistForBest():
             print ("Stage", i)
             self.ResPackClass.preset_generate_onlyval(submodel=i)
 
-            using_params_array=self.ResPackClass.thismodel_add_params_array
-            using_params_array_warn=self.ResPackClass.thismodelwarn_add_params_array
+            using_params_array=self.ResPackClass.thismodel_params_array
+            using_params_array_warn=self.ResPackClass.thismodel_params_warn_array
 
             skiplist=np.isnan(self.ResPackClass.best_index)[:,i]
             Run=MC2fitRun_Mulcore(self.MC2fitSettingClass, self.Runlist_set[i], DirInfoClass,
@@ -406,6 +405,7 @@ class PyGalfit():
         self.dir_work=dir_work
         self.extract_sigma=False
         self.psf_size=10
+        self.use_sky_grad=False
 
 
         try: self.__dict__.update(MC2fitSettingClass.__dict__)
@@ -496,7 +496,8 @@ class PyGalfit():
 
 
     def add_fitting_comp(self, fitting_type='sersic',
-                        est_params=np.full(7, np.nan), is_allow_vary=True, fix_psf_mag=False):
+                        est_params=np.full(7, np.nan), is_allow_vary=True,
+                        fix_psf_mag=False):
         """
         Descr - Add fitting component
         INPUT
@@ -610,8 +611,12 @@ class PyGalfit():
         fconf.write('# Component number: 1\n')
         fconf.write(' 0) sky                    #  object type\n')
         fconf.write(' 1) %f      1              #  sky background at center of fitting region [ADUs]\n' %self.est_sky)
-        fconf.write(' 2) 0.0         0          #  dsky/dx (sky gradient in x)\n')
-        fconf.write(' 3) 0.0         0          #  dsky/dy (sky gradient in y)\n')
+        if(self.use_sky_grad):
+            fconf.write(' 2) 0.0         1          #  dsky/dx (sky gradient in x)\n')
+            fconf.write(' 3) 0.0         1          #  dsky/dy (sky gradient in y)\n')
+        else:
+            fconf.write(' 2) 0.0         0          #  dsky/dx (sky gradient in x)\n')
+            fconf.write(' 3) 0.0         0          #  dsky/dy (sky gradient in y)\n')
         fconf.write(' Z) 0                      #  output option (0 = resid., 1 = Do not subtract)\n')
 
         fconf.close()
@@ -800,6 +805,7 @@ class MC2fitRun():
         self.plate_scale=0.262
         self.zeromag=22.5
         self.est_sky=10
+        self.use_sky_grad=False
         self.re_min=None
         self.n_ratio=None
 
@@ -942,7 +948,7 @@ class MC2fitRun_Mulcore():
         ## Multicore setting
         self.use_try=True
         self.Ncore=2
-        self.show_multicore=True
+        self.show_summary=True
         self.show_progress=-1
 
         ## Additional parameters
@@ -960,18 +966,7 @@ class MC2fitRun_Mulcore():
         except: pass
         self.__dict__.update(kwargs)
         self._post_init()
-        if(self.Ncore!=1):
-            self._show_multicore_result()
 
-
-    def _show_multicore_result(self):
-        Nfailed=np.sum(np.isnan(self.multi_res))
-        print("======== Multicore result ========")
-        print("● Succeed: %d / %d"%(np.sum(self.multi_res==0), len(self.DirInfoClass.dir_work_list)))
-        print("● Failed: %d / %d"%(Nfailed, len(self.DirInfoClass.dir_work_list)))
-        if(Nfailed>0):
-            print(">> See where: self.multi_res")
-            print(">> To debug, use Ncore=1, and use_try = False")
 
     def _post_init(self):
         self.plate_scale=dharray.value_repeat_array(self.plate_scale, 2)
@@ -1015,10 +1010,7 @@ class MC2fitRun_Mulcore():
 
         self.multi_res=mulcore.multicore_run(sub_run_process,
                                              len(self.DirInfoClass.dir_work_list),
-                                             Ncore=self.Ncore,
-                                             use_try=self.use_try,
-                                             show_progress=self.show_progress,
-                                             debug=self.show_multicore)
+                                             **self.__dict__)
         self.multi_res=np.array(self.multi_res)
 
 
@@ -1124,7 +1116,7 @@ class Result():
                                     group_id=self.group_id,
                                     dir_work=self.dir_work_proj)
         ## INPUT 2) Manual
-        if(hasattr(self.fnlist, "__len__")):   ## If fnlist is not empty, use fnlist
+        elif(hasattr(self.fnlist, "__len__")):   ## If fnlist is not empty, use fnlist
             self._input_manual(fnlist=self.fnlist, namelist=self.namelist)
 
         if(self.input_only): return
@@ -1905,7 +1897,7 @@ class PostProcessing_Mulcore():
         ## Multicore setting
         self.use_try=True
         self.Ncore=2
-        self.show_multicore=True
+        self.show_summary=True
         self.show_progress=-1
         self.chi2_radius_array_set=[-1, 50]
         self.chi_item_namelist=['F', '50']
@@ -1919,18 +1911,7 @@ class PostProcessing_Mulcore():
         except: pass
         self.__dict__.update(kwargs)
         self._post_init()
-        if(self.Ncore!=1):
-            self._show_multicore_result()
 
-
-    def _show_multicore_result(self):
-        Nfailed=np.sum(np.isnan(self.multi_res))
-        print("======== Multicore result ========")
-        print("● Succeed: %d / %d"%(np.sum(self.multi_res==0), len(self.DirInfoClass.dir_work_list)))
-        print("● Failed: %d / %d"%(Nfailed, len(self.DirInfoClass.dir_work_list)))
-        if(Nfailed>0):
-            print(">> See where: self.multi_res")
-            print(">> To debug, use Ncore=1, and use_try = False")
 
 
     def _post_init(self):
@@ -1986,10 +1967,8 @@ class PostProcessing_Mulcore():
 
         self.multi_res=mulcore.multicore_run(sub_run_process,
                                              len(self.DirInfoClass.dir_work_list),
-                                             Ncore=self.Ncore,
-                                             use_try=self.use_try,
-                                             show_progress=self.show_progress,
-                                             debug=self.show_multicore)
+                                             **self.__dict__)
+
         self.multi_res=np.array(self.multi_res)
 
 ##=============================================
@@ -2077,7 +2056,7 @@ class ExtractFits():
         ## Multicore setting
         self.use_try=True
         self.Ncore=2
-        self.show_multicore=True
+        self.show_summary=True
         self.show_progress=-1
 
         ## Additional parameters
@@ -2095,8 +2074,6 @@ class ExtractFits():
         except: pass
         self.__dict__.update(kwargs)
         self._post_init()
-        if(self.Ncore!=1):
-            self._show_multicore_result()
 
 
     def _show_multicore_result(self):
@@ -2128,10 +2105,7 @@ class ExtractFits():
 
         self.multi_res=mulcore.multicore_run(sub_run_process,
                                              len(self.DirInfoClass.dir_work_list),
-                                             Ncore=self.Ncore,
-                                             use_try=self.use_try,
-                                             show_progress=self.show_progress,
-                                             debug=self.show_multicore)
+                                             **self.__dict__)
         self.multi_res=np.array(self.multi_res)
 
 
@@ -2149,7 +2123,7 @@ class ResPack():
         ## Multicore setting
         self.use_try=True
         self.Ncore=2
-        self.show_multicore=True
+        self.show_summary=False
         self.show_progress=-1
 
         ## path setting
@@ -2219,12 +2193,10 @@ class ResPack():
         self.raw_output = mulcore.multicore_run(
                                 sub_getdata,
                                 len(self.DirInfoClass.dir_work_list),
-                                Ncore=self.Ncore,
-                                use_try=self.use_try,
                                 use_zip=True,
-                                show_progress=self.show_progress,
-                                debug=self.show_multicore,
-                                errorcode=[-1]*6)
+                                errorcode=[-1]*6,
+                                **self.__dict__
+                                )
 
         if(self.silent==False):
             print("======== output ========")
@@ -2364,7 +2336,7 @@ class ResPack_old():
         ## Multicore setting
         self.use_try=True
         self.Ncore=2
-        self.show_multicore=True
+        self.show_summary=True
         self.show_progress=-1
 
         ## path setting
@@ -2434,12 +2406,10 @@ class ResPack_old():
         self.raw_output = mulcore.multicore_run(
                                 sub_getdata,
                                 len(self.DirInfoClass.dir_work_list),
-                                Ncore=self.Ncore,
-                                use_try=self.use_try,
+                                errorcode=[0,0,0,0,0,0],
                                 use_zip=True,
-                                show_progress=self.show_progress,
-                                debug=self.show_multicore,
-                                errorcode=[0,0,0,0,0,0])
+                                **self.__dict__
+                                )
 
         if(self.silent==False):
             print("======== output ========")

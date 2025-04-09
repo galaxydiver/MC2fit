@@ -1,6 +1,7 @@
 import DH_array as dharray
 import DH_path as dhpath
 import DH_MC2fit_sub as dhmc2fitsub
+import DH_Galfit_sub as galfitsub
 
 import numpy as np
 import os
@@ -1847,7 +1848,7 @@ def add_totalmag(datarray, comp=2, sersic_res=500, plate_scale=0.262, zeromag=22
         ## Old version
         # intmag=sersic_integral2D(mu_e=usingdata['2_MU_E'], reff=usingdata['2_RE'],
         #                   n=usingdata['2_N'], ar=usingdata['2_AR'], plate_scale=plate_scale, res=sersic_res)
-        intmag = mu_to_mag(mu_e=usingdata['2_MU_E'], Re=usingdata['2_RE'],
+        intmag = galfitsub.mu_to_mag(mu_e=usingdata['2_MU_E'], Re=usingdata['2_RE'],
                           n=usingdata['2_N'], ar=usingdata['2_AR'], plate_scale=plate_scale, zeromag=zeromag)
 
     elif(comp==3):
@@ -1855,7 +1856,7 @@ def add_totalmag(datarray, comp=2, sersic_res=500, plate_scale=0.262, zeromag=22
         usingdata=datarray[sersiclist]
         # intmag=sersic_integral2D(mu_e=usingdata['3_MU_E'], reff=usingdata['3_RE'],
         #                   n=usingdata['3_N'], ar=usingdata['3_AR'], plate_scale=plate_scale, res=sersic_res)
-        intmag = mu_to_mag(mu_e=usingdata['3_MU_E'], Re=usingdata['3_RE'],
+        intmag = galfitsub.mu_to_mag(mu_e=usingdata['3_MU_E'], Re=usingdata['3_RE'],
                           n=usingdata['3_N'], ar=usingdata['3_AR'], plate_scale=plate_scale, zeromag=zeromag)
     return intmag, sersiclist[0]
 

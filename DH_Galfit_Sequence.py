@@ -29,7 +29,8 @@ from astropy.modeling.functional_models import Sersic1D, Sersic2D
 
 def multicore_extract_psf_fits(dir_work_list,
                            fna='', band_need=['g', 'r'],
-                           Ncore=10, show_progress=10000, use_try=False, show_multicore=True):
+                           Ncore=10, show_progress=10000,
+                           use_try=False, show_multicore=True):
     global sub_extract_fits
     def sub_extract_fits(i):
         fn=dir_work_list[i]+fna
@@ -43,10 +44,10 @@ def multicore_extract_psf_fits(dir_work_list,
                     newfn=dir_work_list[i]+Path(fn).stem+thisband+'.fits'
                     fits.writeto(newfn, fits.getdata(fn, ext), fits.getheader(fn, ext),
                                  overwrite=True, output_verify='silentfix')
-            return 1
+            return 0
         else:
             #print("No data at ", i)
-            return 0
+            return 1
 
     return mulcore.multicore_run(sub_extract_fits, len(dir_work_list), Ncore=Ncore,
                           use_try=use_try, show_progress=show_progress, debug=show_multicore)
@@ -62,7 +63,8 @@ def multicore_crawling(DirInfo=None, dir_group=None, region='s', dr='dr9',
                        download_image_only=False,
                        is_overwrite_download=False,
                        dir_brick=None,
-                       Ncore=2, show_progress=10000, use_try=True, show_multicore=False, ## Multi-core
+                       Ncore=2, show_progress=10000, use_try=True, ## Multi-core
+                       **kwargs
                        ):
     if(dir_brick==None): dir_brick=dhpath.dir_brick()
     global sub_crawling
@@ -87,9 +89,11 @@ def multicore_crawling(DirInfo=None, dir_group=None, region='s', dr='dr9',
                 Crawl_VIR.psf(mode='target')
                 Crawl_VIR.sigma()
                 Crawl_VIR.maskbits()
+        return 0
 
-    mulcore.multicore_run(sub_crawling, len(DirInfo.dir_work_list), Ncore=Ncore,
-                          use_try=use_try, show_progress=show_progress, debug=show_multicore)
+    mulcore.multicore_run(sub_crawling, len(DirInfo.dir_work_list),
+                          Ncore=Ncore, show_progress=show_progress, use_try=use_try,
+                          **kwargs)
 
     res=np.zeros(len(bandlist), dtype=object)
     for i in range (len(bandlist)):

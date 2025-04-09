@@ -50,6 +50,27 @@ def deg2dms(deg, hms=False, return_hms=False):
     else: return answer # return 2D array
 
 
+class ClassCut():
+    def __init__(self, OriginalClass,
+                 attrlist=None, cutlist=None
+                ):
+
+        self.OriginalClass=OriginalClass
+        if((hasattr(attrlist, "__len__")) & (hasattr(cutlist, "__len__"))):
+            self.cutlist=np.array(cutlist)
+            for thisattr in attrlist:
+                self.cutdata(thisattr)
+
+    def cutdata(self, thisattr):
+        thisattr=thisattr.split('&')
+        prevdata=self.OriginalClass
+        for i, attr in enumerate(thisattr):
+            thisdata=getattr(prevdata, attr)
+            if(i==len(thisattr)-1): ## Last
+                thisdata=thisdata[self.cutlist]
+                setattr(prevdata, attr, thisdata)
+            else:
+                prevdata=thisdata
 
 
 class Flatten:
@@ -422,3 +443,27 @@ def make_aperture_mask(imgsize, radius, center=-1):
     check=np.where((mx-center)**2 + (my-center)**2 <= radius**2)
     mask[check]=0
     return mask
+
+def inverse_var_weighted_mean(data, err):
+    nonnan=np.where(np.isfinite(data) & np.isfinite(err))
+    w = 1/(err**2)
+    mean = np.sum(w[nonnan]*data[nonnan])/np.sum(w[nonnan])
+    eom = (1/np.sum(w[nonnan]))**0.5
+    return mean, eom
+
+def inverse_var_weighted_std(data, err):
+    # Weighted sample standard deviation
+
+    nonnan=np.where(np.isfinite(data) & np.isfinite(err))
+
+    w = 1/(err**2)
+    mean, __ = inverse_var_weighted_mean(data, err)
+
+    term1 = w[nonnan] * (data[nonnan] - mean)**2
+    s = (np.sum(term1)/np.sum(w[nonnan]))**0.5
+
+    print(s)
+    N = len(data[nonnan])
+
+    s_err = s / (2*(N-1))**0.5
+    return s, s_err

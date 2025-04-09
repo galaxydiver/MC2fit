@@ -324,14 +324,18 @@ def multicore_generate_link(DirInfo, DirInfo2, CheckPixel, show_progress=10000, 
     def sub_generate_link(i):
         dir_work_src=os.path.abspath(DirInfo.dir_work_list[i])+"/"
         dir_work_dst=os.path.abspath(DirInfo2.dir_work_list[i])+"/"
-        if(CheckPixel.list_bad[i]==True): return
-        elif(CheckPixel.list_s[i]==True):
-            region='s'
-            dr=dr_south
-        elif(CheckPixel.list_n[i]==True):
-            region='n'
-            dr=dr_north
-        else: print("Error! ", i)
+        if(CheckPixel==None):
+            dr=''
+            region=''
+        else:
+            if(CheckPixel.list_bad[i]==True): return
+            elif(CheckPixel.list_s[i]==True):
+                region='s'
+                dr=dr_south
+            elif(CheckPixel.list_n[i]==True):
+                region='n'
+                dr=dr_north
+            else: print("Error! ", i)
 
         for band in ['g', 'r']:
             src=dir_work_src+"image_"+dr+"_"+region+band+".fits"

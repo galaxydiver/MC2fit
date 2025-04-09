@@ -65,16 +65,17 @@ def download_manager(url, fn_save, overwrite=False, silent=True,
     if(overwrite==False):
         if(os.path.exists(fn_save)==True):
             if(silent==False): print(">> File exist:", fn_save)
-            return
+            return 0
         if(os.path.exists(fn_err)==True):
             if(silent==False): print(">> Error log exist:", fn_err)
-            return
+            return 0
 
     try:
         download_data(url, fn_save, overwrite=overwrite, is_try=False,
                               silent=silent, allow_insecure=allow_insecure,
                               modify_fits=modify_fits, add_offset=add_offset,
                               ext_add_offset_list=ext_add_offset_list)
+        return 0
 
     except urllib.error.HTTPError as e: ## HTTP error
         # if(silent_timeerror==False): print(">> HTTP Error!")
@@ -82,7 +83,7 @@ def download_manager(url, fn_save, overwrite=False, silent=True,
             if(current_try<Ntry):
                 if(use_waittime_rand): time.sleep(random.uniform(sleep/2, sleep))
                 else: time.sleep(sleep)
-                download_manager(url, fn_save, overwrite=overwrite, silent=silent, silent_error=silent_error,
+                return download_manager(url, fn_save, overwrite=overwrite, silent=silent, silent_error=silent_error,
                                 Ntry=Ntry, sleep=sleep, timeout=timeout, use_waittime_rand=use_waittime_rand,
                                 allow_insecure=allow_insecure,
                                 silent_timeerror=True,
@@ -94,19 +95,22 @@ def download_manager(url, fn_save, overwrite=False, silent=True,
             else:
                 np.savetxt(fn_err_tmp, np.array(['http', e]), fmt="%s") ## Ntry cut
                 if(silent_error==False): print(">>>> Too much request error after N tries!", fn_save)
+                return 1
         elif(e.code==503): ## Temporarily Unavailable --> save error separately
             np.savetxt(fn_err_tmp, np.array(['http', e]), fmt="%s") ## Ntry cut
             if(silent_error==False): print(">>>> Temporarily Unavailable!", fn_save)
+            return 1
         else:
             np.savetxt(fn_err, np.array(['http', e]), fmt="%s")  ## Other errors
             if(silent_error==False): print(">>>> Error! code: ", e.code, fn_save)
+            return 1
 
     except socket.timeout as e: ## Timeout error -> Just quit
         if(silent_timeerror==False): print(">> Time out error!", fn_save)
         if(current_try<Ntry):
             if(use_waittime_rand): time.sleep(random.uniform(sleep/2, sleep))
             else: time.sleep(sleep)
-            download_manager(url, fn_save, overwrite=overwrite, silent=silent, silent_error=silent_error,
+            return download_manager(url, fn_save, overwrite=overwrite, silent=silent, silent_error=silent_error,
                             Ntry=Ntry, sleep=sleep, timeout=timeout, use_waittime_rand=use_waittime_rand,
                             allow_insecure=allow_insecure,
                             silent_timeerror=True,
@@ -117,9 +121,11 @@ def download_manager(url, fn_save, overwrite=False, silent=True,
                              ## Restart
         else:
             if(silent_error==False): print(">>>> Time out error after N tries!", fn_save)
+            return 1
 
     except:
         if(silent_error==False): print(">> Other Error!", fn_save)
+        return 1
 
 
 
@@ -185,19 +191,19 @@ def download_cutout(folder, coord,
     cutout_url_north_dr9=cutout_url+'&size=%d&layer=ls-dr9'%(imgsize)+'-north&subimage'
     cutout_url_south_dr10=cutout_url+'&size=%d&layer=ls-dr10'%(imgsize)+'-south&subimage'
 
-
-    download_manager(cutout_url_south_dr9, fn_cutout_south_dr9, overwrite=overwrite,
+    result=download_manager(cutout_url_south_dr9, fn_cutout_south_dr9, overwrite=overwrite,
                      Ntry=Ntry, sleep=sleep, timeout=timeout, use_waittime_rand=use_waittime_rand,
                      silent=silent, silent_error=silent_error, silent_timeerror=silent_timeerror,
                      )
-    download_manager(cutout_url_north_dr9, fn_cutout_north_dr9, overwrite=overwrite,
+    result+=download_manager(cutout_url_north_dr9, fn_cutout_north_dr9, overwrite=overwrite,
                      Ntry=Ntry, sleep=sleep, timeout=timeout, use_waittime_rand=use_waittime_rand,
                      silent=silent, silent_error=silent_error, silent_timeerror=silent_timeerror,
                      )
-    download_manager(cutout_url_south_dr10, fn_cutout_south_dr10, overwrite=overwrite,
+    result+=download_manager(cutout_url_south_dr10, fn_cutout_south_dr10, overwrite=overwrite,
                      Ntry=Ntry, sleep=sleep, timeout=timeout, use_waittime_rand=use_waittime_rand,
                      silent=silent, silent_error=silent_error, silent_timeerror=silent_timeerror,
                      )
+    return result
 
 def download_psf(folder, coord,
                  Ntry=5, sleep=2, timeout=10, use_waittime_rand=True,
@@ -219,39 +225,44 @@ def download_psf(folder, coord,
     psf_url_south_dr10=psf_url+'&layer=ls-dr10'+'-south'
 
 
-    download_manager(psf_url_south_dr9, fn_psf_south_dr9, overwrite=overwrite,
+    result=download_manager(psf_url_south_dr9, fn_psf_south_dr9, overwrite=overwrite,
                      Ntry=Ntry, sleep=sleep, timeout=timeout, use_waittime_rand=use_waittime_rand,
                      silent=silent, silent_error=silent_error, silent_timeerror=silent_timeerror,
                      )
-    download_manager(psf_url_north_dr9, fn_psf_north_dr9, overwrite=overwrite,
+    result+=download_manager(psf_url_north_dr9, fn_psf_north_dr9, overwrite=overwrite,
                      Ntry=Ntry, sleep=sleep, timeout=timeout, use_waittime_rand=use_waittime_rand,
                      silent=silent, silent_error=silent_error, silent_timeerror=silent_timeerror,
                      )
     if(skip_dr10==False):
-        download_manager(psf_url_south_dr10, fn_psf_south_dr10, overwrite=overwrite,
+        result+=download_manager(psf_url_south_dr10, fn_psf_south_dr10, overwrite=overwrite,
                          Ntry=Ntry, sleep=sleep, timeout=timeout, use_waittime_rand=use_waittime_rand,
                          silent=silent, silent_error=silent_error, silent_timeerror=silent_timeerror,
                          )
+    return result
 
 def multicore_download_cutout(DirInfo, silent=True, silent_error=False, silent_timeerror=True,
                               Ntry=5, sleep=2, timeout=10, use_waittime_rand=True,
                               overwrite=False, psf_only=True, skip_dr10=False,
-                          Ncore=10, show_progress=10000, use_try=False, show_multicore=True):
+                          Ncore=10, show_progress=10000, use_try=False,
+                          **kwargs):
     global sub_download_cutout
     print("Start Multicore run")
 
     def sub_image_stat(i):
+        result=0
         if(psf_only==False):
-            download_cutout(DirInfo.dir_work_list[i], DirInfo.coord_array[i], overwrite=overwrite,
+            result+=download_cutout(DirInfo.dir_work_list[i], DirInfo.coord_array[i], overwrite=overwrite,
                             Ntry=Ntry, sleep=sleep, timeout=timeout, use_waittime_rand=use_waittime_rand,
                             silent=silent, silent_error=silent_error, silent_timeerror=silent_timeerror)
-        download_psf(DirInfo.dir_work_list[i], DirInfo.coord_array[i], overwrite=overwrite,
+        result+=download_psf(DirInfo.dir_work_list[i], DirInfo.coord_array[i], overwrite=overwrite,
                      Ntry=Ntry, sleep=sleep, timeout=timeout, use_waittime_rand=use_waittime_rand,
                      silent=silent, silent_error=silent_error, silent_timeerror=silent_timeerror,
                      skip_dr10=skip_dr10)
+        return result
 
-    return mulcore.multicore_run(sub_image_stat, len(DirInfo.dir_work_list), Ncore=Ncore,
-                          use_try=use_try, show_progress=show_progress, debug=show_multicore)
+    return mulcore.multicore_run(sub_image_stat, len(DirInfo.dir_work_list),
+                                 Ncore=Ncore, show_progress=show_progress, use_try=use_try,
+                                 **kwargs)
 
 
 def crop_fits(filename, coord, size=(100, 100), ext_img=1, ext_wcs=1, fill_value=np.nan):
