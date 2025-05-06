@@ -25,17 +25,17 @@ def get_mu_to_re_flux(Re, n, ar=1):  ## Flux R<Re
     term3 = gammainc(2*n, x)*gamma(2*n)
     return term1*term2*term3
 
-def mu_to_mag(mu_e, Re, n, ar=1, plate_scale=0.262):
-    amp = 10**((-mu_e)/2.5) ## Amplitude (Flux / arcsec^2)  ## zeromag will not affect the results
+def mu_to_mag(mu_e, Re, n, ar=1, plate_scale=0.262, zeromag=22.5):
+    amp = 10**((zeromag-mu_e)/2.5) ## Amplitude (Flux / arcsec^2)  ## zeromag will not affect the results
     conversion = get_mu_to_re_flux(Re*plate_scale, n, ar)
     tot_flux = 2 * amp * conversion ## Total flux = Flux(R<Re)*2
-    return -2.5*np.log10(tot_flux)
+    return zeromag-2.5*np.log10(tot_flux)
 
-def mag_to_mu(mag, Re, n, ar=1, plate_scale=0.262):
-    flux = 10**((-mag)/2.5) ## Amplitude (Flux / arcsec^2)  ## zeromag will not affect the results
+def mag_to_mu(mag, Re, n, ar=1, plate_scale=0.262, zeromag=22.5):
+    flux = 10**((zeromag-mag)/2.5) ## Amplitude (Flux / arcsec^2)  ## zeromag will not affect the results
     conversion = get_mu_to_re_flux(Re*plate_scale, n, ar)
     amp = flux / 2 / conversion ## Total flux = Flux(R<Re)*2
-    return -2.5*np.log10(amp)
+    return zeromag-2.5*np.log10(amp)
 
 def sersic_integral2D(mu_e, reff, n, ar, plate_scale, res=500, scale_fac=100):
     """

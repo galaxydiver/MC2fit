@@ -2,7 +2,6 @@ import DH_array as dharray
 import DH_path as dhpath
 import DH_MC2fit_sub as dhmc2fitsub
 import DH_multicore as mulcore
-import DH_FileCheck as dhfc
 
 import numpy as np
 import os, glob, shutil
@@ -11,12 +10,12 @@ import time
 import pickle
 import copy
 from astropy.io import fits
+from dataclasses import dataclass, field
 from matplotlib import gridspec
 import matplotlib.pyplot as plt
 from matplotlib.ticker import AutoMinorLocator
 import pandas as pd
 from scipy import stats
-import skimage
 
 from astropy.modeling.functional_models import Sersic1D, Sersic2D
 from astropy.convolution import Gaussian2DKernel
@@ -28,9 +27,6 @@ from scipy.special import gamma, gammainc, gammaincinv ## Sersic post processing
 import subprocess
 from multiprocessing import Pool
 import warnings
-
-from dataclasses import dataclass, field
-from typing import List, Optional
 
 
 @dataclass
@@ -50,7 +46,6 @@ class Setting:
     ## Info
         band:           str = 'g'
         est_sky:        float = 0 ## estimated sky value [ADU]
-        use_sky_grad:   bool = False ## If True, use sky gradient.
         zeromag:        float = 22.5 ## Photometric zeropoint MAG=-2.5*log(data)+zeromag
         plate_scale:    float = 0.2 ## Input float or array (dx, dy). [arcsec / pix]
         image_size:     int = 500 ## Input int or array (x, y). [pixel]
@@ -79,12 +74,11 @@ class Setting:
     is_run_galfit_dir_work: bool = False ## If true, run GALFIT in each working directory. Use True if you want to extract sigma.fits
 
     ## Info
+    band:           str = 'g'
     est_sky:        float = 0 ## estimated sky value [ADU]
-    use_sky_grad:   bool = False  ## If True, use sky gradient
     zeromag:        float = 22.5 ## Photometric zeropoint MAG=-2.5*log(data)+zeromag
     plate_scale:    float = 0.2 ## Input float or array (dx, dy). [arcsec / pix]
     image_size:     int = 500 ## Input int or array (x, y). [pixel]
-    re_lim_list: Optional[str] = None ## Limiting radius for the fitting for each galaxy. If None, use Galfit radius limit.
 
     ## Run option
     Ncore:          int = 16 ## Multi-core processing
@@ -100,14 +94,13 @@ class Setting:
     show_progress:  float = -1 ## Interval for printing the progress. -1 to hide
     silent:         bool = True ## Print internal messages
 
-    ## Statistics calculation
-    tolerance:      float = 11.83 # Statistics tolerance for "Good results" (|Min stat - stat |/(Min stat) < tolerance)
-    is_tolerance_frac: bool = False ## If True, use the fraction for tolerance (|Min stat - stat |/(Min stat) < tolerance)
-    comp_crit:      str   ='AIC_50' ## Comparing value between results
-    stat_itemlist: List[str] = field(default_factory=lambda: ['CHI2NU', 'RChi_F', 'AIC_F', 'LIK_F', 'RChi_50', 'AIC_50', 'LIK_50'])
+    ## Chi2 calculation
+    tolerance:      float = 1e-3 # Chi2 tolerance for "Good results" (|Min chi2 - chi2 |/(Min chi2) < tolerance)
+    comp_crit:      str   ='RChi_50' ## Comparing value between results
 
 #     np.ndarray = field(default_factory=lambda:
 #                                   np.array(['sersic2', 'sersic2'])) # list of components (Ncomp = len(components))
+
 
     def __post_init__(self):
         self.plate_scale=dharray.value_repeat_array(self.plate_scale, 2)
@@ -115,84 +108,6 @@ class Setting:
         if(self.proj_folder[-1]!='/'): self.proj_folder=self.proj_folder+"/" ## For directory format
         print("Setting completed")
 
-    def update_Class(self, RunlistClass, DirInfoClass, **kwargs):
-        """
-        Add Runlist class
-        """
-        dharray.class_update_keys(self, None, kwargs_update_only=False, **kwargs)
-        self.RunlistClass=copy.deepcopy(RunlistClass)
-        self.DirInfoClass=copy.deepcopy(DirInfoClass)
-        dharray.class_update_keys(self.RunlistClass, self, **kwargs)
-
-    def class_update_keys(self, **kwargs):
-        """
-        Update the class
-        """
-        dharray.class_update_keys(self, None, kwargs_update_only=False, **kwargs)
-       
-
-
-    def run(self, **kwargs):
-        MC2fitRun_Mulcore(self, self.RunlistClass, self.DirInfoClass, **kwargs)
-
-    def extract(self, clear_output_files=True, **kwargs):
-        """
-        Extract the result
-        """
-        ExtractFits(self, self.DirInfoClass, **kwargs)
-        if(clear_output_files):
-            dhfc.multicore_remove(self.DirInfoClass.dir_work_list, 
-                                  fna=self.proj_folder+"/output*", 
-                                  Ncore=self.Ncore)
-            
-    def postprocessing(self, **kwargs):
-        """
-        Post processing
-        """
-        PostProcessing_Mulcore(self, self.RunlistClass, self.DirInfoClass, **kwargs)
-
-    def result(self, galid=0, **kwargs):
-        """
-        Get the result
-        """
-        return Result(self, self.RunlistClass, 
-                           dir_work=self.DirInfoClass.dir_work_list[galid], **kwargs)
-    
-    def drawing(self, galid=0, fn=None, fni_masking=None, **kwargs):
-        """
-        Draw the result
-        """
-        if(fni_masking==None): fni_masking=self.fni_masking
-        return Drawing(self, fn=fn, fn_masking=self.DirInfoClass.dir_work_list[galid]+fni_masking, **kwargs)
-
-    def drawing_legacy(self, galid=0, size=200, dr=9):
-        """
-        Draw the Legacy Survey Image
-        """
-        ## =====Legacy image=====
-        image_fn = 'https://www.legacysurvey.org/viewer/jpeg-cutout'
-        image_fn += '?ra='+str(self.DirInfoClass.coord_array[galid][0])
-        image_fn += '&dec='+str(self.DirInfoClass.coord_array[galid][1])
-        image_fn +='&size='+str(int(size))
-        image_fn +='&layer=ls-dr'+str(int(dr))
-        print(image_fn)
-        return plt.imshow(skimage.io.imread( image_fn )[::-1], origin='lower')
-         
-    def pack_result(self, **kwargs):
-        """
-        Pack the result
-        """
-        return ResPack(self, self.RunlistClass, self.DirInfoClass, **kwargs)
-    
-    def remove_proj_folder(self):
-        """
-        Remove the project folder
-        """
-        print(">> Remove the project folder: ", self.proj_folder)
-        dhfc.multicore_remove_folder(self.DirInfoClass.dir_work_list, Ncore=4, fna=self.proj_folder,
-                            show_progress=1000, ignore_errors=True)
-
-        
 class Runlist():
     """
     Descr - Runlist
@@ -231,17 +146,10 @@ class Runlist():
 
     """
     def __init__(self,
-                 MC2fitSettingClass=None,
+                 MC2fitSettingClass,
                  **kwargs):
 
         ## default setting
-        self.size_conv = 101  ## Convolution box size
-        self.size_fitting = -1
-        self.plate_scale=None
-        self.image_size=None
-
-        ## Runlist
-        self.group_id = 0   ## Fitting group
         self.complist = np.array(['sersic2', 'sersic2'])  # list of components (Ncomp = len(components))
         self.namelist = np.array(['ss_23', 'ss_24', 'ss_25', 'ss_26'])   # Namelist (Nset = len(namelist))
 
@@ -251,8 +159,8 @@ class Runlist():
                                           [np.nan, np.nan, np.array([23, 24, 25, 26]), 10, 4, 1, 0]],
                                           dtype=object) # See note
 
-        ## Constraints
         self.use_constraint = True ## We will use constraints
+
         self.lim_pos = np.array([[80, 120]]) # position constraint
         self.lim_mag = np.nan # magnitude constraint
         self.lim_reff = np.array([[5, 200]]) # Effective radius constraint
@@ -261,14 +169,14 @@ class Runlist():
         self.lim_pa = np.nan
         self.lim_params_array = None ## Instead of above, you can put in the values at once.
 
+        self.group_id = 0   ## Fitting group
+        self.size_conv = 101  ## Convolution box size
+        self.size_fitting = -1
 
-        try: dharray.class_update_keys(self, MC2fitSettingClass, **kwargs)
+
+        try: self.__dict__.update(MC2fitSettingClass.__dict__)
         except: pass
-        user_args = dharray.class_check_user_args(self, locals())
-        # Set only the user-provided arguments as instance attributes
-        for k, v in user_args.items():
-            setattr(self, k, v)
-
+        self.__dict__.update(kwargs)
         self._post_init()
 
 
@@ -409,8 +317,9 @@ class RunlistForBest():
         self.RunlistClass=RunlistClass
         self.ResPackClass=ResPackClass
 
-        try: dharray.class_update_keys(self, MC2fitSettingClass, **kwargs)
+        try: self.__dict__.update(MC2fitSettingClass.__dict__)
         except: pass
+        self.__dict__.update(kwargs)
         self._post_init()
 
 
@@ -457,8 +366,8 @@ class RunlistForBest():
 
             skiplist=np.isnan(self.ResPackClass.best_index)[:,i]
             Run=MC2fitRun_Mulcore(self.MC2fitSettingClass, self.Runlist_set[i], DirInfoClass,
-                                  Ncomp_base_params_array=self.Ncomp_list[i],
-                                  base_params_array_set=using_params_array,
+                                  Ncomp_add_params_array=self.Ncomp_list[i],
+                                  add_params_array_set=using_params_array,
                                   skiplist=skiplist,
                                   is_allow_vary=False,
                                  )
@@ -466,18 +375,18 @@ class RunlistForBest():
             skiplist=np.isnan(self.ResPackClass.bestwarn_index[:,i]) | (self.ResPackClass.bestwarn_index[:,i]==self.ResPackClass.best_index[:,i]) ## Nan or same with the previous
 
             Run=MC2fitRun_Mulcore(self.MC2fitSettingClass, self.Runlist_warn_set[i], DirInfoClass,
-                                  Ncomp_base_params_array=self.Ncomp_list[i],
-                                  base_params_array_set=using_params_array_warn,
+                                  Ncomp_add_params_array=self.Ncomp_list[i],
+                                  add_params_array_set=using_params_array_warn,
                                   skiplist=skiplist,
                                   is_allow_vary=False,
                                  )
+
 
 
 class PyGalfit():
     """
     Automatically run Galfit with input presets
     See also -> Runlist_Galfit (Generate presets)
-
     """
     def __init__(self,
                  MC2fitSettingClass,
@@ -487,41 +396,19 @@ class PyGalfit():
         ## default setting
         self.size_fitting = -1  # Fix the fitting area       ## -1 -> Full image
         self.size_conv = -1     # Convolution size.             ## -1 --> Auto (size of the PSF image)
-        self.psf_size=10
-        self.plate_scale=None
-        self.image_size=None
-        self.use_sky_grad=False
-        self.zeromag=22.5
-        self.est_sky=10
-        self.fn_galfit='/home/galfit/'
-        self.output_block=True
-
-        ## Naming
         self.prefix=''
         self.suffix=''
         self.outputname='galfit'
-        self.dir_work=dir_work
-        self.proj_folder='galfit/'
-
-        self.fni_sigma='sigma.fits'
-        self.fni_image='image.fits'
-        self.fni_psf='psf.fits'
-        self.fni_masking='masking.fits'
-
-        ## More Settings
-        self.extract_sigma=False
         self.is_run_galfit_dir_work=False
-
         self.check_files=True
-        self.silent=True
+        self.dir_work=dir_work
+        self.extract_sigma=False
+        self.psf_size=10
 
 
-        try: dharray.class_update_keys(self, MC2fitSettingClass, **kwargs)
+        try: self.__dict__.update(MC2fitSettingClass.__dict__)
         except: pass
-        user_args = dharray.class_check_user_args(self, locals())
-        # Set only the user-provided arguments as instance attributes
-        for k, v in user_args.items():
-            setattr(self, k, v)
+        self.__dict__.update(kwargs)
         self._post_init()
 
 
@@ -607,8 +494,7 @@ class PyGalfit():
 
 
     def add_fitting_comp(self, fitting_type='sersic',
-                        est_params=np.full(7, np.nan), is_allow_vary=True,
-                        fix_psf_mag=False):
+                        est_params=np.full(7, np.nan), is_allow_vary=True, fix_psf_mag=False):
         """
         Descr - Add fitting component
         INPUT
@@ -722,12 +608,8 @@ class PyGalfit():
         fconf.write('# Component number: 1\n')
         fconf.write(' 0) sky                    #  object type\n')
         fconf.write(' 1) %f      1              #  sky background at center of fitting region [ADUs]\n' %self.est_sky)
-        if(self.use_sky_grad):
-            fconf.write(' 2) 0.0         1          #  dsky/dx (sky gradient in x)\n')
-            fconf.write(' 3) 0.0         1          #  dsky/dy (sky gradient in y)\n')
-        else:
-            fconf.write(' 2) 0.0         0          #  dsky/dx (sky gradient in x)\n')
-            fconf.write(' 3) 0.0         0          #  dsky/dy (sky gradient in y)\n')
+        fconf.write(' 2) 0.0         0          #  dsky/dx (sky gradient in x)\n')
+        fconf.write(' 3) 0.0         0          #  dsky/dy (sky gradient in y)\n')
         fconf.write(' Z) 0                      #  output option (0 = resid., 1 = Do not subtract)\n')
 
         fconf.close()
@@ -756,7 +638,7 @@ class PyGalfit():
         fconf.write('# Component     Parameter    Constraint range       Comment\n\n')
 
 
-    def add_constraints(self, id_comp, lim_params=np.full((7,2), np.nan), re_lim=None, n_ratio=None):
+    def add_constraints(self, id_comp, lim_params=np.full((7,2), np.nan), re_min=None, n_ratio=None):
         """
         Descr - Add fitting constraint
         INPUT
@@ -769,22 +651,14 @@ class PyGalfit():
                  default  [center|center|20 | 20 | 4 |1 |0 ]
 
         """
-
-        ## New set for R_e
-        if(hasattr(re_lim, "__len__")):
-            if(len(re_lim)==2):
-                lim_params[3,0]=np.nanmax([lim_params[3,0], re_lim[0]])
-                lim_params[3,1]=np.nanmin([lim_params[3,1], re_lim[1]])
-            else:
-                lim_params[3,0]=np.nanmax([lim_params[3,0], re_lim])
-
-
         id_comp=int(id_comp)
         if(self.silent==False): print("● Added constraint for ", id_comp)
         fconf = open(self.fn_constraint, 'a')
         check_valid=np.sum(lim_params, axis=1)
         par_in_list=['x', 'y', 'mag', 'reff', 'n', 'q', 'pa']
 
+        if(hasattr(re_min, "__len__")):
+            lim_params[3]+=re_min
 
         for i, par_in in enumerate(par_in_list):
             if(np.isfinite(check_valid[i])):
@@ -857,18 +731,18 @@ class MC2fitRun():
      * fn_image, fn_imputmask, fn_psf, fn_sigma: absolute path for input images. (if 'fni', it follows above)
 
      *** parameters ***
-     * base_params_array : array_like
+     * add_params_array : array_like
         It will be added/replaced to the est_params. For None, it will be ignored.
-        See, base_params_add
+        See, add_params_mode
         If length of array is 1, the array will be applied to the all runlists.
         (Default=None)
              index    [  0   |  1   | 2 |  3 | 4 |5 |6 ]
              params   [ xpos | ypos |mag|reff| n |ar|pa]
 
-     * base_params_add : bool or array (default: True)
-        Add (True) or replace (False) the est_params.
+     * add_params_mode : str or array (default: 'add')
+        Add or replace the est_params.
         list or array is also possible.
-        (e.g., True, [True, True, True, False, False, False, False])
+        (e.g., 'add', ['add', 'add', 'replace'])
      * is_allow_vary: If false, the value is fixed. Galfit will not change the parameter
         1) True/False -> Apply the value for all parameters (Default=True)
         2) Array -> Apply the values for each parameter
@@ -907,9 +781,9 @@ class MC2fitRun():
         self.extract_sigma=False
 
         ## Parameter array
-        self.base_params_array=None
-        self.Ncomp_base_params_array=0
-        self.base_params_add=True
+        self.add_params_array=None
+        self.Ncomp_add_params_array=0
+        self.add_params_mode='add'
         self.is_nth_mag_offset=False
         self.fix_psf_mag=False
         self.add_constraints_array=None
@@ -922,19 +796,18 @@ class MC2fitRun():
 
         ## default values
         self.plate_scale=0.262
-        self.image_size=200
         self.zeromag=22.5
         self.est_sky=10
-        self.use_sky_grad=False
-        self.re_lim=None
+        self.re_min=None
         self.n_ratio=None
 
         ## Class
         self.MC2fitSettingClass=MC2fitSettingClass
         self.RunlistClass=RunlistClass
 
-        try: dharray.class_update_keys(self, MC2fitSettingClass, **kwargs)
+        try: self.__dict__.update(MC2fitSettingClass.__dict__)
         except: pass
+        self.__dict__.update(kwargs)
         self._post_init()
 
 
@@ -949,24 +822,12 @@ class MC2fitRun():
         if(self.group_id<0): usingrunlist=copy.deepcopy(self.RunlistClass.runlist)
         else: usingrunlist=copy.deepcopy(self.RunlistClass.runlist[np.isin(self.RunlistClass.runlist['group_ID'], self.group_id)])
 
-        self.Ncomp_max=0
-        for i_run in range (len(usingrunlist)):
-            thisrunlist=usingrunlist[i_run]
-            if(thisrunlist['ncomp']>self.Ncomp_max): self.Ncomp_max=thisrunlist['ncomp']
-
-
-        ## If base_params_array is given --> Add values to runlist
-        if(hasattr(self.base_params_array, "__len__")==False):
-            self.base_params_array=np.zeros((self.Ncomp_max, 7))
-            self.base_params_add=True
-        if(hasattr(self.base_params_add, "__len__")==False):
-            self.base_params_add=dharray.repeat_except_array(self.base_params_add, 7)
-        self.base_params_add=np.array(self.base_params_add)
-        if(len(self.base_params_array)<self.Ncomp_max):
-            print("Warning! base_params_array is not enough for the number of components!")
-
-
-        if(self.silent==False): print(">> Additional params array will be added! Ncomp:", self.base_params_array)
+        ## If add_params_array is given --> Add values to runlist
+        if(hasattr(self.add_params_array, "__len__")==False):
+            self.Ncomp_add_params_array=0
+        if(self.Ncomp_add_params_array!=0):
+            self.add_params_mode=dharray.repeat_except_array(self.add_params_mode, self.Ncomp_add_params_array)
+            if(self.silent==False): print(">> Additional params array will be considered! Ncomp:", self.Ncomp_add_params_array)
 
 
         ## ================Loop=================
@@ -989,25 +850,19 @@ class MC2fitRun():
                        size_fitting=thisrunlist['size_fitting'],
                        **self.__dict__)
 
-
-
         for comp in range (thisrunlist['ncomp']):
-            thisrunlist['est_params'][comp,self.base_params_add]+=self.base_params_array[comp,self.base_params_add] ## add
-            thisrunlist['est_params'][comp,~self.base_params_add]=self.base_params_array[comp,~self.base_params_add] ## replace
-            
-            # if(comp<(self.Ncomp_base_params_array)):
-            #     ## Add / replace est params
-            #     if(self.base_params_add[comp]==True): thisrunlist['est_params'][comp]+=self.base_params_array[comp]
-            #     else: thisrunlist['est_params'][comp]=self.base_params_array[comp]
+            if(comp<(self.Ncomp_add_params_array)):
+                ## Add / replace est params
+                if(self.add_params_mode[comp]=='add'): thisrunlist['est_params'][comp]+=self.add_params_array[comp]
+                else: thisrunlist['est_params'][comp]=self.add_params_array[comp]
 
-            # if(comp>0): # Except for the first comp
-            #     if(self.is_nth_mag_offset):
-            #         if(self.debug):
-            #             print(">> Offset mag")
-            #             print(thisrunlist['est_params'][comp,2], thisrunlist['est_params'][0,2])
-            #         thisrunlist['est_params'][comp,2]+=thisrunlist['est_params'][0,2]
 
-            
+            if(comp>0): # Except for the first one
+                if(self.is_nth_mag_offset):
+                    if(self.debug):
+                        print(">> Offset mag")
+                        print(thisrunlist['est_params'][comp,2], thisrunlist['est_params'][0,2])
+                    thisrunlist['est_params'][comp,2]+=thisrunlist['est_params'][0,2]
 
             if(self.debug):
                 print("\n>> j", comp)
@@ -1023,7 +878,7 @@ class MC2fitRun():
             if(thisrunlist['use_lim']==True):
                 PyGal.add_constraints(id_comp=comp+2, ## 1: Sky, 2: Comp0, 3: Comp1, ...
                                              lim_params=thisrunlist['lim_params'][comp],
-                                             re_lim=self.re_lim,
+                                             re_min=self.re_min,
                                              n_ratio=self.n_ratio
                                    )
 
@@ -1049,18 +904,18 @@ class MC2fitRun_Mulcore():
      * fn_image, fn_imputmask, fn_psf, fn_sigma: absolute path for input images. (if 'fni', it follows above)
 
      *** parameters ***
-     * base_params_array : array_like
+     * add_params_array : array_like
         It will be added/replaced to the est_params. For None, it will be ignored.
-        See, base_params_add
+        See, add_params_mode
         If length of array is 1, the array will be applied to the all runlists.
         (Default=None)
              index    [  0   |  1   | 2 |  3 | 4 |5 |6 ]
              params   [ xpos | ypos |mag|reff| n |ar|pa]
 
-     * base_params_add : bool or array (default: True)
-        Add (True) or replace (False) the est_params.
+     * add_params_mode : str or array (default: 'add')
+        Add or replace the est_params.
         list or array is also possible.
-        (e.g., True, [True, True, True, False, False, False, False])
+        (e.g., 'add', ['add', 'add', 'replace'])
      * is_allow_vary: If false, the value is fixed. Galfit will not change the parameter
         1) True/False -> Apply the value for all parameters (Default=True)
         2) Array -> Apply the values for each parameter
@@ -1077,12 +932,11 @@ class MC2fitRun_Mulcore():
                  RunlistClass,
                  DirInfoClass,
                  remove_galfit_interval=300,
-                 base_params_array_set=None,
-                 re_lim_list=None,
+                 add_params_array_set=None,
+                 re_cut_list=None,
                  skiplist=None,
                  **kwargs):
 
-        # Preset
         ## Multicore setting
         self.use_try=True
         self.Ncore=2
@@ -1090,51 +944,31 @@ class MC2fitRun_Mulcore():
         self.show_progress=-1
 
         ## Additional parameters
-        self.base_params_array_set=None
-        self.remove_galfit_interval=None
-        self.re_lim_list=None
-        self.skiplist=None
-
-        self.plate_scale=None
-        self.image_size=None
-
-        self.proj_folder=None
-        self.fast_skip=False
-        self.silent=True
+        self.add_params_array_set=add_params_array_set
+        self.remove_galfit_interval=remove_galfit_interval
+        self.re_cut_list=re_cut_list
+        self.skiplist=skiplist
 
         ## Class
         self.MC2fitSettingClass=MC2fitSettingClass
-        try: dharray.class_update_keys(self, MC2fitSettingClass, **kwargs)
-        except: pass
-        user_args = dharray.class_check_user_args(self, locals())
-        # Set only the user-provided arguments as instance attributes
-        for k, v in user_args.items():
-            setattr(self, k, v)
-
         self.RunlistClass=RunlistClass
         self.DirInfoClass=DirInfoClass
+
+        try: self.__dict__.update(MC2fitSettingClass.__dict__)
+        except: pass
+        self.__dict__.update(kwargs)
         self._post_init()
 
 
     def _post_init(self):
         self.plate_scale=dharray.value_repeat_array(self.plate_scale, 2)
         self.image_size=dharray.value_repeat_array(self.image_size, 2)
-        if(self.silent==False): 
-            print(">> Multicore run for galfit")
-            print("re_lim_list", self.re_lim_list)
-            print("skiplist", self.skiplist)
 
-
-        if(hasattr(self.base_params_array_set, "__len__")==False): self.base_params_array_set=np.full(len(self.DirInfoClass.dir_work_list), None)
+        if(hasattr(self.add_params_array_set, "__len__")==False): self.add_params_array_set=np.full(len(self.DirInfoClass.dir_work_list), None)
         if(hasattr(self.skiplist, "__len__")==False): self.skiplist=np.full(len(self.DirInfoClass.dir_work_list), False)
-        if(hasattr(self.re_lim_list, "__len__")==False): self.re_lim_list=np.full(len(self.DirInfoClass.dir_work_list), None)
-        else:
-            if(len(self.re_lim_list)!=len(self.DirInfoClass.dir_work_list)):
-                print("Warning! Check re_lim_list!")
-                print("Stop the function")
-                return
-        if(len(self.base_params_array_set)!=len(self.DirInfoClass.dir_work_list)):
-            print("Warning! Check base_params_array!")
+        if(hasattr(self.re_cut_list, "__len__")==False): self.re_cut_list=np.full(len(self.DirInfoClass.dir_work_list), None)
+        if(len(self.add_params_array_set)!=len(self.DirInfoClass.dir_work_list)):
+            print("Warning! Check add_params_array!")
             print("Stop the function")
             return
 
@@ -1157,8 +991,8 @@ class MC2fitRun_Mulcore():
 
 
             MC2fitRun(dir_work=dir_work,
-                      base_params_array=self.base_params_array_set[i],
-                      re_lim=self.re_lim_list[i],
+                      add_params_array=self.add_params_array_set[i],
+                      re_cut=self.re_cut_list[i],
                       **self.__dict__
                      )
 
@@ -1178,7 +1012,7 @@ class Result():
     Descr - Galfit result function
     INPUT
       0) For all input types
-      * tolerance: Statistics tolerance for "Good results" (|Min stat - stat |/(Min stat) < tolerance) (Default=1e-3)
+      * tolerance: Chi2 tolerance for "Good results" (|Min chi2 - chi2 |/(Min chi2) < tolerance) (Default=1e-3)
       * silent: Print text (Default=False)
       * ignore_no_files: Run the code even though there is no any files. (Default=False)
       * auto_input: Auto_input mode (sequence 1 -> 2 -> 3) (Default=True)
@@ -1205,7 +1039,6 @@ class Result():
         self.dir_work=dir_work
         self.input_only=False
         self.fnlist=None
-        self.proj_folder='galfit/'
 
         ## Data
         self.group_id=None
@@ -1213,35 +1046,27 @@ class Result():
         ## Parameters & Criteria
         self.paramslist=['XC', 'YC', 'MU_E', 'RE', 'N', 'AR', 'PA', 'MAG']
         self.comp_crit='RChi_50'
-        self.tolerance=1e-3 # Statistics tolerance for "Good results" (|Min stat - stat |/(Min stat) < tolerance)
-        self.is_tolerance_frac = True
+        self.tolerance=1e-3 # Chi2 tolerance for "Good results" (|Min chi2 - chi2 |/(Min chi2) < tolerance)
         self.ignore_no_files=False
         self.reff_snr_crit=2
         self.reff_snr_n_cut=100
         self.n_crit=2
-        self.re_lim=None
-        self.stat_itemlist= ['CHI2NU', 'AIC_F', 'RChi_50', 'AIC_50']
+        self.re_cut=[0,0]
+        self.chi2_itemlist= ['CHI2NU', 'AIC_F', 'RChi_50', 'AIC_50']
         self.extended_itemlist=['war_tot', 'is_swap', 'group_ID']
         self.comp_autoswap=False
         self.swapmode='N'
         self.comp_4th_nsc_autoswap=True
         self.comp_4th_ss_autoswap=True
-        self.silent=False
-        self.plate_scale=0.262
-        self.image_size=200
 
         ## Class
         self.MC2fitSettingClass=MC2fitSettingClass
         self.RunlistClass=RunlistClass
 
-        try: dharray.class_update_keys(self, MC2fitSettingClass, **kwargs)
+        try: self.__dict__.update(MC2fitSettingClass.__dict__)
         except: pass
-        user_args = dharray.class_check_user_args(self, locals())
-        # Set only the user-provided arguments as instance attributes
-        for k, v in user_args.items():
-            setattr(self, k, v)
+        self.__dict__.update(kwargs)
         self._post_init()
-
 
     def _post_init(self):
         self.galfit_itemlist_2nd=dharray.array_attach_string(self.paramslist, '2_', add_at_head=True)
@@ -1251,7 +1076,7 @@ class Result():
         # basically, galfit_itemlist= 2nd + 3rd.
         # If there is 4th component, it will be added at 'input_runlist'
         self.galfit_itemlist=self.galfit_itemlist_2nd+self.galfit_itemlist_3rd
-        self.extended_itemlist=self.stat_itemlist+self.extended_itemlist
+        self.extended_itemlist=self.chi2_itemlist+self.extended_itemlist
 
 
         self.dir_work_proj=os.path.join(self.dir_work, self.proj_folder)
@@ -1267,9 +1092,8 @@ class Result():
         if(self.Data.Ndata!=0):
             self.best=self.find_best(remove_warn=True)
             self.best_warn=self.find_best(remove_warn=False)
-            try: self.best_near=self.find_near_best(self.Data.val[self.comp_crit][self.best],
-                                               tolerance=self.tolerance, comp_crit=self.comp_crit,
-                                               is_tolerance_frac=self.is_tolerance_frac)
+            try: self.best_near=self.find_near_best(self.Data.val[comp_crit][self.best],
+                                               tolerance=self.tolerance, comp_crit=comp_crit)
             except: self.best_near=self.best
         else: ## No data
             self.best, self.best_warn, self.best_near = np.array([np.nan]), np.array([np.nan]), np.array([np.nan])
@@ -1335,7 +1159,7 @@ class Result():
 
         self.Data=ResGalData(namelist=namelist, fnlist=fnlist,
                             data_type=self.galfit_itemlist+self.extended_itemlist,
-                            stat_itemlist=self.stat_itemlist
+                            chi2_itemlist=self.chi2_itemlist
                             )
 
         if(self.silent==False): print(">> # of data : ", len(fnlist))
@@ -1420,7 +1244,7 @@ class Result():
         for i_run in range(len(runlist)):
 
             thislim=copy.deepcopy(runlist['lim_params'][i_run])
-            thislim[:,3]=self.re_lim ## Add manual cut
+            thislim[:,3]+=self.re_cut ## Add manual cut
             thislim=np.vstack(thislim)
             #this_pos_pos=pos_pos[pos_pos<len(thislim)]  # cut higher components
             #(e.g,) Total galfit_itemlist is up to 3rd comp. but this run has only 2nd comp.
@@ -1514,8 +1338,8 @@ class Result():
     def find_best(self, remove_warn=True, comp_crit=None):
         if(self.silent==False): print("\n● Find the best submodel")
         if(comp_crit==None): comp_crit=self.comp_crit
-        statlist=self.Data.val[comp_crit]
-        usingindex=np.arange(len(statlist))
+        chi2list=self.Data.val[comp_crit]
+        usingindex=np.arange(len(chi2list))
         if(remove_warn==True):
             if(self.silent==False): print(">> Without warning")
             usingindex=usingindex[(self.Data.war_tot==0)
@@ -1526,7 +1350,7 @@ class Result():
                 if(self.silent==False): print(">> No results. Finding the best regardless of the warning")
                 return self.find_best(remove_warn=False)
             ## If All data is NaN
-            checknan=np.sum(np.isnan(statlist[usingindex]))
+            checknan=np.sum(np.isnan(chi2list[usingindex]))
             if(checknan==len(usingindex)):
                 if(self.silent==False): print(">> No results. Finding the best regardless of the warning")
                 return self.find_best(remove_warn=False)
@@ -1534,23 +1358,22 @@ class Result():
             ## Reff_Strange filter
             good_data=usingindex[(self.Data.reff_strange==False)
                                  & (self.Data.n_strange==False)
-                                 & np.isfinite(statlist[usingindex])]
+                                 & np.isfinite(chi2list[usingindex])]
             ## If no results
             if(len(good_data)==0):
                 if(self.silent==False): print(">> All data is ruled out by the Reff SNR criterion.")
                 pass
             else: usingindex=usingindex[(self.Data.reff_strange==False) & (self.Data.n_strange==False)]
 
-        min_stat=np.nanmin(statlist[usingindex])
-        minpos=np.where(statlist[usingindex]==min_stat)[0]
+        min_chi=np.nanmin(chi2list[usingindex])
+        minpos=np.where(chi2list[usingindex]==min_chi)[0]
         return usingindex[minpos]
 
-    def find_near_best(self, min_stat, tolerance=0, comp_crit='RChi_50', is_tolerance_frac=True):
-        statlist=self.Data.val[comp_crit]
-        if(hasattr(min_stat, "__len__")): min_stat=np.nanmin(min_stat)
-        if(is_tolerance_frac): self.stat_diff=np.abs(statlist-min_stat)/min_stat
-        else: self.stat_diff=np.abs(statlist-min_stat)
-        nearpos=np.where(self.stat_diff<tolerance)[0] ## Fraction
+    def find_near_best(self, min_chi, tolerance=0, comp_crit='RChi_50'):
+        chi2list=self.Data.val[comp_crit]
+        if(hasattr(min_chi, "__len__")): min_chi=np.nanmin(min_chi)
+        self.chi2_diff=np.abs(chi2list-min_chi)/min_chi
+        nearpos=np.where(self.chi2_diff<tolerance)[0] ## Fraction
         return nearpos
 
     def save_data(self, fna_output='saved_resgal.dat', fn_output='', return_array=False):
@@ -1577,24 +1400,24 @@ class Result():
         errorlist=self.Data.namelist[self.Data.war_tot.astype(bool)]
         lowsnrlist=self.Data.namelist[self.Data.reff_strange.astype(bool) | self.Data.n_strange.astype(bool)]
 
-        newitemlist_stat=np.append(newitemlist, self.stat_itemlist)
-        self.df_display(self.Data.val[newfilelist][newitemlist_stat], newfilelist, errorlist, lowsnrlist, caption='Values')
+        newitemlist_chi2=np.append(newitemlist, self.chi2_itemlist)
+        self.df_display(self.Data.val[newfilelist][newitemlist_chi2], newfilelist, errorlist, lowsnrlist, caption='Values')
 
         if(only_val==False):
             self.df_display(self.Data.err[newfilelist][newitemlist], newfilelist, errorlist, lowsnrlist, caption='Error')
             self.df_display(self.Data.war[newfilelist][newitemlist], newfilelist, errorlist, lowsnrlist, caption='Warning', is_limit_format=True)
 
-    def df_display_backup(self, data, newfilelist, errorlist, lowsnrlist, caption='datatype', is_limit_format=False):
+    def df_display(self, data, newfilelist, errorlist, lowsnrlist, caption='datatype', is_limit_format=False):
         df=pd.DataFrame(data, index=self.Data.namelist[newfilelist])
         if(is_limit_format==True): formatting='{:.0f}'
         else: formatting='{:f}'
-        df=df.style.apply(lambda x: ['background: lightyellow; color: black' if x.name in self.Data.namelist[self.best_near]
+        df=df.style.apply(lambda x: ['background: lightyellow' if x.name in self.Data.namelist[self.best_near]
                                       else '' for i in x],
                            axis=1)\
-            .apply(lambda x: ['background: bisque; color: black' if x.name in self.Data.namelist[self.best_warn]
+            .apply(lambda x: ['background: bisque' if x.name in self.Data.namelist[self.best_warn]
                               else '' for i in x],
                    axis=1)\
-            .apply(lambda x: ['background: lightgreen; color: black' if x.name in self.Data.namelist[self.best]
+            .apply(lambda x: ['background: lightgreen' if x.name in self.Data.namelist[self.best]
                                       else '' for i in x],
                            axis=1)\
             .apply(lambda x: ['color: red' if x.name in errorlist
@@ -1613,83 +1436,44 @@ class Result():
         }])
         display(df)
 
-    def df_display(self, data, newfilelist, errorlist, lowsnrlist, caption='datatype', is_limit_format=False):
-        df = pd.DataFrame(data, index=self.Data.namelist[newfilelist])
-        if is_limit_format: formatting = '{:.0f}'
-        else: formatting = '{:f}'
-
-        # === 스타일 설정 ===
-        df_style = df.style\
-            .apply(lambda x: ['background: lightyellow; color: black' if x.name in self.Data.namelist[self.best_near]
-                            else '' for _ in x], axis=1)\
-            .apply(lambda x: ['background: bisque; color: black' if x.name in self.Data.namelist[self.best_warn]
-                            else '' for _ in x], axis=1)\
-            .apply(lambda x: ['background: lightgreen; color: black' if x.name in self.Data.namelist[self.best]
-                            else '' for _ in x], axis=1)\
-            .apply(lambda x: ['color: red' if x.name in errorlist
-                            else '' for _ in x], axis=1)\
-            .apply(lambda x: ['font-style: italic; font-weight:bold' if x.name in lowsnrlist
-                            else '' for _ in x], axis=1)\
-            .format(formatting)\
-            .set_caption(caption)
-
-        # Define styles for table elements (caption and headers)
-        header_styles = [{
-            'selector': 'caption',
-            'props': [('color', 'red'), ('font-size', '16px')]
-        }]
-
-        # Highlight the header background color of a specific column 
-        target_col = self.comp_crit
-        if target_col in df.columns:
-            col_index = df.columns.get_loc(target_col)
-            header_styles.append({
-                'selector': f'th.col{col_index}',
-                'props': [('background-color', 'lightblue')]
-            })
-
-        # Apply the header style
-        df_style = df_style.set_table_styles(header_styles)
-        display(df_style)
-
     def make_swaplist(self, mode='RE'):
         if(mode=='RE'):
             return np.where(self.Data.val['2_RE']<self.Data.val['3_RE'])[0] # Larger Re
         elif(mode=='N'):
             return np.where(self.Data.val['3_N']<self.Data.val['2_N'])[0] #Lower N
-        # elif(mode=='MU'):
-        #     swaplist=np.zeros(len(self.Data.val), dtype=bool)
-        #     for i in range (len(self.Data.val)):
-        #         if(np.isnan(self.Data.val[i]['3_N'])): continue
-        #         s2=Sersic1D(amplitude=mu2pix(self.Data.val[i]['2_MU_E'], plate_scale=self.plate_scale, zeromag=self.zeromag),
-        #                                     r_eff=self.Data.val[i]['2_RE'], n=self.Data.val[i]['2_N'])
-        #         s3=Sersic1D(amplitude=mu2pix(self.Data.val[i]['3_MU_E'], plate_scale=self.plate_scale, zeromag=self.zeromag),
-        #                     r_eff=self.Data.val[i]['3_RE'], n=self.Data.val[i]['3_N'])
-        #         re=np.nanmax([self.Data.val[i]['2_RE'], self.Data.val[i]['3_RE']])
-        #         swaplist[i]=(s2(re)<s3(re))  #Outer region -> brighter
-        #     return np.where(swaplist==True)
-        # elif(mode=='2MU'):
-        #     swaplist=np.zeros(len(self.Data.val), dtype=bool)
-        #     for i in range (len(self.Data.val)):
-        #         if(np.isnan(self.Data.val[i]['3_N'])): continue
-        #         s2=Sersic1D(amplitude=mu2pix(self.Data.val[i]['2_MU_E'], plate_scale=self.plate_scale, zeromag=self.zeromag),
-        #                     r_eff=self.Data.val[i]['2_RE'], n=self.Data.val[i]['2_N'])
-        #         s3=Sersic1D(amplitude=mu2pix(self.Data.val[i]['3_MU_E'], plate_scale=self.plate_scale, zeromag=self.zeromag),
-        #                     r_eff=self.Data.val[i]['3_RE'], n=self.Data.val[i]['3_N'])
-        #         re=2*np.nanmax([self.Data.val[i]['2_RE'], self.Data.val[i]['3_RE']])
-        #         swaplist[i]=(s2(re)<s3(re))  #Outer region -> brighter
-        #     return np.where(swaplist==True)
-        # elif(mode=='3MU'):
-        #     swaplist=np.zeros(len(self.Data.val), dtype=bool)
-        #     for i in range (len(self.Data.val)):
-        #         if(np.isnan(self.Data.val[i]['3_N'])): continue
-        #         s2=Sersic1D(amplitude=mu2pix(self.Data.val[i]['2_MU_E'], plate_scale=self.plate_scale, zeromag=self.zeromag),
-        #                     r_eff=self.Data.val[i]['2_RE'], n=self.Data.val[i]['2_N'])
-        #         s3=Sersic1D(amplitude=mu2pix(self.Data.val[i]['3_MU_E'], plate_scale=self.plate_scale, zeromag=self.zeromag),
-        #                     r_eff=self.Data.val[i]['3_RE'], n=self.Data.val[i]['3_N'])
-        #         re=3*np.nanmax([self.Data.val[i]['2_RE'], self.Data.val[i]['3_RE']])
-        #         swaplist[i]=(s2(re)<s3(re))  #Outer region -> brighter
-        #     return np.where(swaplist==True)
+        elif(mode=='MU'):
+            swaplist=np.zeros(len(self.Data.val), dtype=bool)
+            for i in range (len(self.Data.val)):
+                if(np.isnan(self.Data.val[i]['3_N'])): continue
+                s2=Sersic1D(amplitude=mu2pix(self.Data.val[i]['2_MU_E'], plate_scale=self.plate_scale, zeromag=self.zeromag),
+                                            r_eff=self.Data.val[i]['2_RE'], n=self.Data.val[i]['2_N'])
+                s3=Sersic1D(amplitude=mu2pix(self.Data.val[i]['3_MU_E'], plate_scale=self.plate_scale, zeromag=self.zeromag),
+                            r_eff=self.Data.val[i]['3_RE'], n=self.Data.val[i]['3_N'])
+                re=np.nanmax([self.Data.val[i]['2_RE'], self.Data.val[i]['3_RE']])
+                swaplist[i]=(s2(re)<s3(re))  #Outer region -> brighter
+            return np.where(swaplist==True)
+        elif(mode=='2MU'):
+            swaplist=np.zeros(len(self.Data.val), dtype=bool)
+            for i in range (len(self.Data.val)):
+                if(np.isnan(self.Data.val[i]['3_N'])): continue
+                s2=Sersic1D(amplitude=mu2pix(self.Data.val[i]['2_MU_E'], plate_scale=self.plate_scale, zeromag=self.zeromag),
+                            r_eff=self.Data.val[i]['2_RE'], n=self.Data.val[i]['2_N'])
+                s3=Sersic1D(amplitude=mu2pix(self.Data.val[i]['3_MU_E'], plate_scale=self.plate_scale, zeromag=self.zeromag),
+                            r_eff=self.Data.val[i]['3_RE'], n=self.Data.val[i]['3_N'])
+                re=2*np.nanmax([self.Data.val[i]['2_RE'], self.Data.val[i]['3_RE']])
+                swaplist[i]=(s2(re)<s3(re))  #Outer region -> brighter
+            return np.where(swaplist==True)
+        elif(mode=='3MU'):
+            swaplist=np.zeros(len(self.Data.val), dtype=bool)
+            for i in range (len(self.Data.val)):
+                if(np.isnan(self.Data.val[i]['3_N'])): continue
+                s2=Sersic1D(amplitude=mu2pix(self.Data.val[i]['2_MU_E'], plate_scale=self.plate_scale, zeromag=self.zeromag),
+                            r_eff=self.Data.val[i]['2_RE'], n=self.Data.val[i]['2_N'])
+                s3=Sersic1D(amplitude=mu2pix(self.Data.val[i]['3_MU_E'], plate_scale=self.plate_scale, zeromag=self.zeromag),
+                            r_eff=self.Data.val[i]['3_RE'], n=self.Data.val[i]['3_N'])
+                re=3*np.nanmax([self.Data.val[i]['2_RE'], self.Data.val[i]['3_RE']])
+                swaplist[i]=(s2(re)<s3(re))  #Outer region -> brighter
+            return np.where(swaplist==True)
 
 
 class ResultBest(Result):
@@ -1713,7 +1497,7 @@ class ResultBest(Result):
         else: self.MomRes.check_strange_n(n_crit=self.n_crit)
 
         self.galfit_itemlist=self.MomRes.galfit_itemlist
-        self.stat_itemlist=self.MomRes.stat_itemlist
+        self.chi2_itemlist=self.MomRes.chi2_itemlist
         self.dir_work=self.MomRes.dir_work
         self.dir_work_proj=self.MomRes.dir_work_proj
         val_ori=self.MomRes.Data.val
@@ -1732,8 +1516,8 @@ class ResultBest(Result):
         index_total=np.arange(len(val_ori))
         self.bestsubmodels=np.zeros(len(self.grouplist), dtype=object) # Best models (w/o warning)
         self.bestsubmodels_warn=np.zeros(len(self.grouplist), dtype=object) #Best models w/ w/o warning
-        self.stat_submodels=np.zeros(len(self.grouplist), dtype=object) # Statistics (Chi2 or AIC) for submodels
-        self.stat_bestsubmodels=np.zeros(len(self.grouplist), dtype=object) # Statistics (Chi2 or AIC) for bestsubmodels
+        self.chi2_submodels=np.zeros(len(self.grouplist), dtype=object) # Chi2 (or AIC) for submodels
+        self.chi2_bestsubmodels=np.zeros(len(self.grouplist), dtype=object) # Chi2 (or AIC) for bestsubmodels
 
         for i, group_id in enumerate(self.grouplist):
             self.Data=copy.deepcopy(self.MomRes.Data) ## Temporary
@@ -1758,8 +1542,8 @@ class ResultBest(Result):
             index=self.find_best(remove_warn=True)
             if(self.get_single): index=[index[0]]
             self.bestsubmodels[i]=index_this[index]
-            self.stat_submodels[i]=np.copy(self.Data.val[self.comp_crit])
-            self.stat_bestsubmodels[i]=np.copy(self.Data.val[self.comp_crit][index])
+            self.chi2_submodels[i]=np.copy(self.Data.val[self.comp_crit])
+            self.chi2_bestsubmodels[i]=np.copy(self.Data.val[self.comp_crit][index])
 
             #Best models w/ w/o warning
             index=self.find_best(remove_warn=False)
@@ -1769,8 +1553,8 @@ class ResultBest(Result):
     def _nan_thismodel(self, i):
         self.group_non_empty[i]=False
         self.bestsubmodels[i]=np.array([np.nan])
-        self.stat_submodels[i]=np.array([np.nan])
-        self.stat_bestsubmodels[i]=np.array([np.nan])
+        self.chi2_submodels[i]=np.array([np.nan])
+        self.chi2_bestsubmodels[i]=np.array([np.nan])
         self.bestsubmodels_warn[i]=np.array([np.nan])
 
     def _clean_results(self):
@@ -1798,15 +1582,14 @@ class ResultBest(Result):
             self.best_warn=self.find_best(remove_warn=False)
             try: self.best_near=self.find_near_best(self.Data.val[self.comp_crit][self.best],
                                                tolerance=self.MomRes.tolerance,
-                                               comp_crit=self.comp_crit,
-                                               is_tolerance_frac=self.MomRes.is_tolerance_frac)
+                                               comp_crit=self.comp_crit)
             except: self.best_near=self.best
 
 
 
-class StatUpdate():
+class Chi2Update():
     """
-    Descr - Calculate statistics including Chi2 and AIC, and update Galfit fits
+    Descr - Calculate chi2 and update Galfit fits
     ** Input files in the list should share the same simga & masking images
     ** See cal_chi2()
     INPUT
@@ -1815,15 +1598,15 @@ class StatUpdate():
                   If None : The code will make a flat image
      * fn_masking : Masking file (A single file for all files in fnlist).
                     If None : Do not mask
-     * radius : The region for calculating statistics (Radius)
+     * radius : The region for calculating chi2 (Radius)
                      If -1, calculate for all region (default = -1)
      * image_size : Size of images (default = 200)
      * repair_fits : Repair the Galfit header if it has problem (Default : True)
-     * stat_item_name : Name of the region as a new header. (default : 'F')
-       ** 'Chi_'+'stat_item_name' will be added for the chi2 value
-       ** 'RChi_'+'stat_item_name' will be added for the reduced chi2 value
-       ** 'NDOF_'+'stat_item_name' will be added for the number of DOF
-       ** 'LIK_'+'stat_item_name' will be added for the likehood value
+     * chi_item_name : Input chi2 name as a new header. (default : 'F')
+       ** 'Chi_'+'chi_item_name' will be added for the chi2 value
+       ** 'RChi_'+'chi_item_name' will be added for the reduced chi2 value
+       ** 'NDOF_'+'chi_item_name' will be added for the number of DOF
+       ** 'LIK_'+'chi_item_name' will be added for the likehood value
      * fn_add_front : Base Path when the input file does not have extensions
        ** In this case, image file will be loaded from 'fn_add_front' + header['DATAIN']
      * Overwrite : (default : False)
@@ -1841,8 +1624,8 @@ class StatUpdate():
         self.fn_masking=fn_masking
         self.repair_fits=True
         self.image_size=200
-        self.stat_radius_list=[-1, 50]
-        self.stat_item_namelist=['F', '50']
+        self.chi2_radius_list=[-1, 50]
+        self.chi_item_namelist=['F', '50']
         self.fn_add_front=''
         self.overwrite=False,
         self.silent=True
@@ -1861,14 +1644,14 @@ class StatUpdate():
 
     def _get_data(self):
         ## Multi-radius
-        if(hasattr(self.stat_radius_list, "__len__")):
-            self.Nseq=len(self.stat_radius_list)
+        if(hasattr(self.chi2_radius_list, "__len__")):
+            self.Nseq=len(self.chi2_radius_list)
         else:
-            self.stat_radius_list=np.array([self.stat_radius_list])
+            self.chi2_radius_list=np.array([self.chi2_radius_list])
             self.Nseq=1
 
-        if(self.silent==False): print("Radius", self.stat_radius_list)
-        self.stat_item_namelist=dharray.repeat_except_array(self.stat_item_namelist, self.Nseq)
+        if(self.silent==False): print("Radius", self.chi2_radius_list)
+        self.chi_item_namelist=dharray.repeat_except_array(self.chi_item_namelist, self.Nseq)
 
         ## Input sigma
         if(self.fn_sigma==None): # If no sigma -> Make a flat image
@@ -1890,7 +1673,7 @@ class StatUpdate():
         ## Check previous work
         if(self.overwrite==False):
             try:  # Header exists --> Next file
-                GDat.header['LIK_'+self.stat_item_namelist]
+                GDat.header['LIK_'+self.chi_item_namelist]
                 return
             except: # Do work!
                 pass
@@ -1901,46 +1684,42 @@ class StatUpdate():
 
         ## ============= Save Log =============
         fits.setval(fn, 'postpro', value="============== Post Processing ==============", after='LOGFILE', ext=ext_save)
-        fits.setval(fn, 'pfn_sig', value=self.fn_sigma, after='postpro', ext=ext_save, comment='fn_sigma')
-        fits.setval(fn, 'pfn_mask', value=self.fn_masking, after='pfn_sig', ext=ext_save, comment='fn_mask')
+        fits.setval(fn, 'pfn_sig', value=self.fn_sigma, after='postpro', ext=ext_save)
+        fits.setval(fn, 'pfn_mask', value=self.fn_masking, after='pfn_sig', ext=ext_save)
 
         ## ============= Save results =======================
         for seq in range (self.Nseq):
-            fits.setval(fn, 'Field'+self.stat_item_namelist[seq], value="--"*20, ext=ext_save, comment='Region for Stat')
-            fits.setval(fn, 'Re_'+self.stat_item_namelist[seq], value=self.stat_radius_list[seq], ext=ext_save, comment='Actual radius')
-            
+            fits.setval(fn, 'Field'+self.chi_item_namelist[seq], value="--"*20, ext=ext_save)
+
             ## Main calc
-            chi2, Npixel=cal_chi2(GDat.resi, self.sig, self.mask, self.stat_radius_list[seq])
+            chi2, Npixel=cal_chi2(GDat.resi, self.sig, self.mask, self.chi2_radius_list[seq])
 
             if(Npixel<=0): chi2=1e7-1
             if(np.isinf(chi2)): chi2=1e7-1
-
-            fits.setval(fn, 'Chi_'+self.stat_item_namelist[seq], value=chi2, ext=ext_save, comment='Chi2 value')
+            fits.setval(fn, 'Chi_'+self.chi_item_namelist[seq], value=chi2, ext=ext_save)
 
             p=GDat.header['NFREE']
             ndof=Npixel-p
-            fits.setval(fn, 'NPIX_'+self.stat_item_namelist[seq], value=Npixel, ext=ext_save, comment='Number of pixels')
-            fits.setval(fn, 'NDOF_'+self.stat_item_namelist[seq], value=ndof, ext=ext_save, comment='Number of DOF')
+            fits.setval(fn, 'NDOF_'+self.chi_item_namelist[seq], value=ndof, ext=ext_save)
 
             if((ndof>10) & (np.isfinite(chi2))):
-                rchi2=chi2/ndof
+                fits.setval(fn, 'RChi_'+self.chi_item_namelist[seq], value=chi2/ndof, ext=ext_save)
                 aic=chi2+2*p+(2*p*(p+1))/(Npixel-p-1)
+                fits.setval(fn, 'AIC_'+self.chi_item_namelist[seq], value=aic, ext=ext_save)
                 # https://stats.libretexts.org/Bookshelves/Introductory_Statistics/Statistics_with_Technology_2e_(Kozak)/11%3A_Chi-Square_and_ANOVA_Tests/11.02%3A_Chi-Square_Goodness_of_Fit
                 likelihood=1-stats.chi2.cdf(chi2, ndof)
-            else:
-                rchi2=1e7-1
-                aic=1e7-1
-                likelihood=-(1e7-1)
+                fits.setval(fn, 'LIK_'+self.chi_item_namelist[seq], value=likelihood, ext=ext_save)
 
-            fits.setval(fn, 'RChi_'+self.stat_item_namelist[seq], value=rchi2, ext=ext_save, comment='Reduced Chi2 value')
-            fits.setval(fn, 'AIC_'+self.stat_item_namelist[seq], value=aic, ext=ext_save, comment='AIC')
-            fits.setval(fn, 'LIK_'+self.stat_item_namelist[seq], value=likelihood, ext=ext_save, comment='Likelihood')
+            else:
+                fits.setval(fn, 'RChi_'+self.chi_item_namelist[seq], value=1e7-1, ext=ext_save)
+                fits.setval(fn, 'AIC_'+self.chi_item_namelist[seq], value=1e7-1, ext=ext_save)
+                fits.setval(fn, 'LIK_'+self.chi_item_namelist[seq], value=-(1e7-1), ext=ext_save)
 
         if(self.silent==False): print(">>", fn, "Done")
 
 def cal_chi2(dat, sig, mask=None, radius=-1):
     """
-    Descr - calculate chi2 (See also class StatUpdate)
+    Descr - calculate chi2 (See also. cal_update_chi2)
     INPUT
      - dat : data array
      - sig : sigma array
@@ -1982,29 +1761,19 @@ class PostProcessing():
         self.silent=False
 
         ## Parameters
-        self.stat_radius_list = [-1, 50]
-        self.stat_item_namelist = ['F', '50']
+        self.chi2_radius_list = [-1, 50]
+        self.chi_item_namelist = ['F', '50']
         self.repair_fits = True
         self.centermag = 'sersic'
         self.sersic_res = 500
-        self.plate_scale = 0.262
-        self.image_size = 200
 
         ## Class
         self.MC2fitSettingClass=MC2fitSettingClass
         self.RunlistClass=RunlistClass
 
-        ## Path
-        self.fni_sigma='sigma_g.fits'
-        self.fni_masking=None
-
-
-        try: dharray.class_update_keys(self, MC2fitSettingClass, **kwargs)
+        try: self.__dict__.update(MC2fitSettingClass.__dict__)
         except: pass
-        user_args = dharray.class_check_user_args(self, locals())
-        # Set only the user-provided arguments as instance attributes
-        for k, v in user_args.items():
-            setattr(self, k, v)
+        self.__dict__.update(kwargs)
         self._post_init()
 
 
@@ -2023,7 +1792,7 @@ class PostProcessing():
         else: self.fn_masking=self.dir_work+self.fni_masking
 
         self.check_params()
-        self.postprocessing_stat() ## Calc stats
+        self.post_chi2() ## Calc chi2
 
         ##================ Centermag ========================
         if(self.centermag!=None):
@@ -2036,39 +1805,40 @@ class PostProcessing():
 
             if(self.centermag=='sersic'):
                 self.centermag_sersic()
-            # elif(self.centermag=='galfit'):
-            #     self.centermag_galfit()
+            elif(self.centermag=='galfit'):
+                self.centermag_galfit()
 
     def check_params(self):
         if(self.silent==False): print(">> Check params")
-        if(hasattr(self.stat_radius_list, "__len__")):
-            self.Nseq=len(self.stat_radius_list)
+        if(hasattr(self.chi2_radius_list, "__len__")):
+            self.Nseq=len(self.chi2_radius_list)
         else: self.Nseq=1
         if(self.silent==False): print(">>>> Nseq : ", self.Nseq)
-        if(type(self.stat_item_namelist)==str):
+        if(type(self.chi_item_namelist)==str):
             Nname=1
-        else: Nname=len(self.stat_item_namelist)
+        else: Nname=len(self.chi_item_namelist)
+        if(self.silent==False): print(">>>> Nchi_item_name : ", Nname)
 
         if(Nname!=self.Nseq):
             print("Warning! The input length is strange!")
-            print(">> stat_radius : ", self.Nseq)
-            print(">> stat_item_name : ", Nname)
+            print(">> chi_radius : ", self.Nseq)
+            print(">> chi_item_name : ", Nname)
 
-    def postprocessing_stat(self):
-        if(self.silent==False): print(">> Calculate Statistics")
+    def post_chi2(self):
+        ##chi2
+        if(self.silent==False): print(">> Post chi2")
         fnlist=dharray.array_attach_string(self.RunlistClass.runlist['name'], 'result_', add_at_head=True)
         fnlist=dharray.array_attach_string(fnlist, self.dir_work+self.proj_folder, add_at_head=True)
         fnlist=dharray.array_attach_string(fnlist, '.fits')
         self.fnlist=np.array(fnlist)
-        StatUpdate(**self.__dict__)
+        Chi2Update(**self.__dict__)
 
     def centermag_sersic(self):
-        if(self.silent==False): 
-            print(">> Sersic Centermag")
+        if(self.silent==False): print(">> Sersic Centermag")
         tmag2, sersiclist2=add_totalmag(self.ResThis.Data.val, comp=2,
-                                        sersic_res=self.sersic_res, plate_scale=self.plate_scale[0])
+                                        sersic_res=self.sersic_res, plate_scale=self.plate_scale[0], zeromag=self.zeromag)
         tmag3, sersiclist3=add_totalmag(self.ResThis.Data.val, comp=3,
-                                        sersic_res=self.sersic_res, plate_scale=self.plate_scale[0])
+                                        sersic_res=self.sersic_res, plate_scale=self.plate_scale[0], zeromag=self.zeromag)
         ## INPUT
 
         for i, fn in enumerate (self.fnlist[sersiclist2]):
@@ -2086,7 +1856,7 @@ class PostProcessing():
             inputvalue+=" +/- 0.0000"
             fits.setval(fn, '3_MAG', value=inputvalue, ext=save_ext, after='3_MU_E', comment='Integrated magnitude (post-processed)')
 
-def add_totalmag(datarray, comp=2, sersic_res=500, plate_scale=0.262):
+def add_totalmag(datarray, comp=2, sersic_res=500, plate_scale=0.262, zeromag=22.5):
     ## Integral mag
     if(comp==2):
         sersiclist=np.where(np.isfinite(datarray['2_MU_E']))
@@ -2095,7 +1865,7 @@ def add_totalmag(datarray, comp=2, sersic_res=500, plate_scale=0.262):
         # intmag=sersic_integral2D(mu_e=usingdata['2_MU_E'], reff=usingdata['2_RE'],
         #                   n=usingdata['2_N'], ar=usingdata['2_AR'], plate_scale=plate_scale, res=sersic_res)
         intmag = dhmc2fitsub.mu_to_mag(mu_e=usingdata['2_MU_E'], Re=usingdata['2_RE'],
-                          n=usingdata['2_N'], ar=usingdata['2_AR'], plate_scale=plate_scale)
+                          n=usingdata['2_N'], ar=usingdata['2_AR'], plate_scale=plate_scale, zeromag=zeromag)
 
     elif(comp==3):
         sersiclist=np.where(np.isfinite(datarray['3_MU_E']))
@@ -2103,7 +1873,7 @@ def add_totalmag(datarray, comp=2, sersic_res=500, plate_scale=0.262):
         # intmag=sersic_integral2D(mu_e=usingdata['3_MU_E'], reff=usingdata['3_RE'],
         #                   n=usingdata['3_N'], ar=usingdata['3_AR'], plate_scale=plate_scale, res=sersic_res)
         intmag = dhmc2fitsub.mu_to_mag(mu_e=usingdata['3_MU_E'], Re=usingdata['3_RE'],
-                          n=usingdata['3_N'], ar=usingdata['3_AR'], plate_scale=plate_scale)
+                          n=usingdata['3_N'], ar=usingdata['3_AR'], plate_scale=plate_scale, zeromag=zeromag)
     return intmag, sersiclist[0]
 
 class PostProcessing_Mulcore():
@@ -2116,54 +1886,40 @@ class PostProcessing_Mulcore():
                  DirInfoClass,
                  **kwargs):
 
-        ## Default setting
-        self.stat_radius_array_set=[-1, 50]
-        self.stat_item_namelist=['F', '50']
-        self.proj_folder='galfit/'
-        self.fast_skip=False
-        self.remove_galfit_interval=30
-
         ## Multicore setting
         self.use_try=True
         self.Ncore=2
         self.show_summary=True
         self.show_progress=-1
-
-        ## Parameters
-        self.sersic_res = 500
-        self.plate_scale = 0.262
-        self.image_size = 200
+        self.chi2_radius_array_set=[-1, 50]
+        self.chi_item_namelist=['F', '50']
 
         ## Class
         self.MC2fitSettingClass=MC2fitSettingClass
         self.RunlistClass=RunlistClass
         self.DirInfoClass=DirInfoClass
 
-
-        try: dharray.class_update_keys(self, MC2fitSettingClass, **kwargs)
+        try: self.__dict__.update(MC2fitSettingClass.__dict__)
         except: pass
-        user_args = dharray.class_check_user_args(self, locals())
-        # Set only the user-provided arguments as instance attributes
-        for k, v in user_args.items():
-            setattr(self, k, v)
+        self.__dict__.update(kwargs)
         self._post_init()
 
 
 
     def _post_init(self):
 
-        self.stat_radius_array_set=np.array(self.stat_radius_array_set)
-        if(np.ndim(self.stat_radius_array_set)==1):
-            self.stat_radius_array_set=np.repeat(np.array([self.stat_radius_array_set]),
+        self.chi2_radius_array_set=np.array(self.chi2_radius_array_set)
+        if(np.ndim(self.chi2_radius_array_set)==1):
+            self.chi2_radius_array_set=np.repeat(np.array([self.chi2_radius_array_set]),
                                              len(self.DirInfoClass.dir_work_list),
                                              axis=0)
 #         self.plate_scale=dharray.value_repeat_array(self.plate_scale, 2)
 #         self.image_size=dharray.value_repeat_array(self.image_size, 2)
-#         if(hasattr(self.stat_radius_list, "__len__")==False): ## Const
-#             self.stat_radius_list=np.repeat(self.stat_radius_list, len(DirInfo.dir_work_list)) ## 1D array
-#         if(hasattr(self.stat_radius_list, "__len__")):
-#             if(np.ndim(self.stat_radius_list)==1): ## 1D array
-#                 self.stat_radius_list=np.array([self.stat_radius_list]).T ## 2D array (N*1)
+#         if(hasattr(self.chi2_radius_list, "__len__")==False): ## Const
+#             self.chi2_radius_list=np.repeat(self.chi2_radius_list, len(DirInfo.dir_work_list)) ## 1D array
+#         if(hasattr(self.chi2_radius_list, "__len__")):
+#             if(np.ndim(self.chi2_radius_list)==1): ## 1D array
+#                 self.chi2_radius_list=np.array([self.chi2_radius_list]).T ## 2D array (N*1)
 
         global sub_run_process
 
@@ -2188,12 +1944,12 @@ class PostProcessing_Mulcore():
 #                                 chi_item_name=chi_item_name,
 #                                 fn_add_front=fn_add_front,
 #                                 plate_scale=plate_scale, zeromag=zeromag,
-#                                 stat_full_image=stat_full_image,
+#                                 chi2_full_image=chi2_full_image,
 #                                 centermag=centermag, sersic_res=500,
 #                                 overwrite=overwrite, silent=silent, print_galfit=print_galfit)
 
             PostProcessing(dir_work=dir_work,
-            stat_radius_list=self.stat_radius_array_set[i],
+            chi2_radius_list=self.chi2_radius_array_set[i],
                       **self.__dict__
                      )
 
@@ -2306,12 +2062,9 @@ class ExtractFits():
         self.MC2fitSettingClass=MC2fitSettingClass
         self.DirInfoClass=DirInfoClass
 
-        try: dharray.class_update_keys(self, MC2fitSettingClass, **kwargs)
+        try: self.__dict__.update(MC2fitSettingClass.__dict__)
         except: pass
-        user_args = dharray.class_check_user_args(self, locals())
-        # Set only the user-provided arguments as instance attributes
-        for k, v in user_args.items():
-            setattr(self, k, v)
+        self.__dict__.update(kwargs)
         self._post_init()
 
 
@@ -2322,7 +2075,7 @@ class ExtractFits():
         print("● Failed: %d / %d"%(Nfailed, len(self.DirInfoClass.dir_work_list)))
         if(Nfailed>0):
             print(">> See where: self.multi_res")
-            print(">> To debug, use Ncore=1, use_try = False")
+            print(">> To debug, use Ncore=1, and use_try = False")
 
     def _post_init(self):
         self.extract_ext=int(self.extract_ext)
@@ -2371,13 +2124,11 @@ class ResPack():
         self.swapmode='N'
         self.comp_4th_nsc_autoswap=True
         self.comp_4th_ss_autoswap=False
-        self.stat_itemlist= ['CHI2NU', 'AIC_F', 'RChi_50', 'AIC_50']
+        self.chi2_itemlist= ['CHI2NU', 'AIC_F', 'RChi_50', 'AIC_50']
         self.comp_crit='AIC_50',
         self.reff_snr_crit=2
         self.reff_snr_n_cut=2
-        self.re_lim_list=None
-
-        self.silent=False
+        self.re_cut_list=None
 
 
         ## Class
@@ -2385,12 +2136,9 @@ class ResPack():
         self.RunlistClass=RunlistClass
         self.DirInfoClass=DirInfoClass
 
-        try: dharray.class_update_keys(self, MC2fitSettingClass, **kwargs)
+        try: self.__dict__.update(MC2fitSettingClass.__dict__)
         except: pass
-        user_args = dharray.class_check_user_args(self, locals())
-        # Set only the user-provided arguments as instance attributes
-        for k, v in user_args.items():
-            setattr(self, k, v)
+        self.__dict__.update(kwargs)
         self._post_init()
 
 #     def _show_multicore_result(self):
@@ -2404,10 +2152,8 @@ class ResPack():
 
 
     def _post_init(self):
-        print("Pack the results")
-        print(">> comp_crit: ", self.comp_crit)
-        if(hasattr(self.re_lim_list, "__len__")==False):
-            self.re_lim_list=np.full(len(self.DirInfoClass.dir_work_list), np.nan)
+        if(hasattr(self.re_cut_list, "__len__")==False):
+            self.re_cut_list=np.full(len(self.DirInfoClass.dir_work_list), np.nan)
         self._getdata()
 
 
@@ -2553,17 +2299,13 @@ class ResPack():
         for i in range(2, Ncomp_max):
             head=str(i)+"_"
             thiscompitem=dharray.array_attach_string(item, head, add_at_head=True)
-            # print(thiscompitem)  ['2_XC', '2_YC', '2_MU_E', '2_RE', '2_N', '2_AR', '2_PA']
-            
-            ## Check if the component exists
-            ## if '2_XC' exists, comp2 exists
-            if(np.isin(thiscompitem[0], usingdat.dtype.names)): 
+            if(np.isin(thiscompitem[0], usingdat.dtype.names)): ## If it has item
                 for j in range (len(item)):
                     params_array[:,i,j]=usingdat[thiscompitem[j]]
 
                 ## if the data has not N --> it might be PSF
                 is_psf=np.isfinite(params_array[:,i,0]) &  np.isnan(params_array[:,i,4])
-                params_array[is_psf,i,2]=usingdat[is_psf][head+'MAG'] ## Mag copy
+                params_array[is_psf,i,2]=usingdat[is_psf][thiscompitem[2]] ## Mag copy
             else: break
 
         Ncomp_max=i
@@ -2595,11 +2337,11 @@ class ResPack_old():
         self.swapmode='N'
         self.comp_4th_nsc_autoswap=True
         self.comp_4th_ss_autoswap=False
-        self.stat_itemlist= ['CHI2NU', 'AIC_F', 'RChi_50', 'AIC_50']
+        self.chi2_itemlist= ['CHI2NU', 'AIC_F', 'RChi_50', 'AIC_50']
         self.comp_crit='AIC_50',
         self.reff_snr_crit=2
         self.reff_snr_n_cut=2
-        self.re_lim_list=None
+        self.re_cut_list=None
 
 
         ## Class
@@ -2623,8 +2365,8 @@ class ResPack_old():
 
 
     def _post_init(self):
-        if(hasattr(self.re_lim_list, "__len__")==False):
-            self.re_lim_list=np.full(len(self.DirInfoClass.dir_work_list), np.nan)
+        if(hasattr(self.re_cut_list, "__len__")==False):
+            self.re_cut_list=np.full(len(self.DirInfoClass.dir_work_list), np.nan)
         self._getdata()
 
 
@@ -2719,26 +2461,26 @@ class ResPack_old():
             self.thismodelwarn_onlyerr=temp4
             #self.thismodel_onlyval, self.thismodel_onlyerr=self.generate_onlyval(self.fulldat, index=self.best_index[:,submodel])
             #self.thismodelwarn_onlyval, self.thismodelwarn_onlyerr=self.generate_onlyval(self.fulldat, index=self.bestwarn_index[:,submodel])
-        self._get_base_params_array(submodel, is_mag=is_mag)
+        self._get_add_params_array(submodel, is_mag=is_mag)
 
-    def _get_base_params_array(self, submodel=-1, is_mag=False):
+    def _get_add_params_array(self, submodel=-1, is_mag=False):
         if(submodel==-1): ##best of best
-            self.is_sersic, self.base_params1_array, self.base_params2_array, self.base_params3_array\
-            = convert_base_params_array(self.bob_onlyval, is_mag=is_mag)
-            self.base_params_array=np.stack((self.base_params1_array, self.base_params2_array, self.base_params3_array), axis=1)
+            self.is_sersic, self.add_params1_array, self.add_params2_array, self.add_params3_array\
+            = convert_add_params_array(self.bob_onlyval, is_mag=is_mag)
+            self.add_params_array=np.stack((self.add_params1_array, self.add_params2_array, self.add_params3_array), axis=1)
 
             self.is_sersic_warn, self.addwarn_params1_array, self.addwarn_params2_array, self.addwarn_params3_array\
-            = convert_base_params_array(self.bobwarn_onlyval, is_mag=is_mag)
+            = convert_add_params_array(self.bobwarn_onlyval, is_mag=is_mag)
             self.addwarn_params_array=np.stack((self.addwarn_params1_array, self.addwarn_params2_array, self.addwarn_params3_array), axis=1)
 
         else:
-            self.thismodel_is_sersic, self.thismodel_base_params1_array, self.thismodel_base_params2_array, self.thismodel_base_params3_array\
-            = convert_base_params_array(self.thismodel_onlyval, is_mag=is_mag)
-            self.thismodel_base_params_array=np.stack((self.thismodel_base_params1_array, self.thismodel_base_params2_array, self.thismodel_base_params3_array), axis=1)
+            self.thismodel_is_sersic, self.thismodel_add_params1_array, self.thismodel_add_params2_array, self.thismodel_add_params3_array\
+            = convert_add_params_array(self.thismodel_onlyval, is_mag=is_mag)
+            self.thismodel_add_params_array=np.stack((self.thismodel_add_params1_array, self.thismodel_add_params2_array, self.thismodel_add_params3_array), axis=1)
 
-            self.thismodelwarn_is_sersic, self.thismodelwarn_base_params1_array, self.thismodelwarn_base_params2_array, self.thismodelwarn_base_params3_array\
-            = convert_base_params_array(self.thismodelwarn_onlyval, is_mag=is_mag)
-            self.thismodelwarn_base_params_array=np.stack((self.thismodelwarn_base_params1_array, self.thismodelwarn_base_params2_array, self.thismodelwarn_base_params3_array), axis=1)
+            self.thismodelwarn_is_sersic, self.thismodelwarn_add_params1_array, self.thismodelwarn_add_params2_array, self.thismodelwarn_add_params3_array\
+            = convert_add_params_array(self.thismodelwarn_onlyval, is_mag=is_mag)
+            self.thismodelwarn_add_params_array=np.stack((self.thismodelwarn_add_params1_array, self.thismodelwarn_add_params2_array, self.thismodelwarn_add_params3_array), axis=1)
 
 
 
@@ -2799,12 +2541,9 @@ class Drawing():
         self.ylim=None
         self.Nminor_tick=5
 
-        try: dharray.class_update_keys(self, MC2fitSettingClass, **kwargs)
+        try: self.__dict__.update(MC2fitSettingClass.__dict__)
         except: pass
-        user_args = dharray.class_check_user_args(self, locals())
-        # Set only the user-provided arguments as instance attributes
-        for k, v in user_args.items():
-            setattr(self, k, v)
+        self.__dict__.update(kwargs)
         self._post_init()
 
 
@@ -2938,13 +2677,13 @@ def auto_drawing(fnlist, descr_list, suptitle='Name : Gal 1',                   
                  fn_masking=None, show_masking=True, show_masking_center=True, fill_masking=True,    # Masking
                  scale_percentile=None, fix_row=False, dpi=100, fn_save_image='UDG_example.png'):
 
-    # Check Statistics
-    stat_list=np.full(3, np.nan)
+    # Check chi^2
+    chi_list=np.full(3, np.nan)
     for i in range (len(fnlist)):
         try:
             hdu=fits.open(fnlist[i])
-            stat_list[i]=hdu[2].header['CHI2NU']
-        except: stat_list[i]=np.nan
+            chi_list[i]=hdu[2].header['CHI2NU']
+        except: chi_list[i]=np.nan
 
     # Drawing
     fig=plt.figure(figsize=(13,12))
@@ -2957,7 +2696,7 @@ def auto_drawing(fnlist, descr_list, suptitle='Name : Gal 1',                   
     for i in range (Nrow):
         if(i==0): show_htitle=True
         else: show_htitle=False
-        if(stat_list[i]==np.nanmin(stat_list)): c_vtitle='r'
+        if(chi_list[i]==np.nanmin(chi_list)): c_vtitle='r'
         else: c_vtitle='k'
         try: drawing_galfit(fnlist[i], gs=gs, data_index=i, descr=descr_list[i],
                        show_htitle=show_htitle, c_vtitle=c_vtitle, scale_percentile=scale_percentile,
@@ -3054,7 +2793,7 @@ class ResGalData:
     namelist : np.ndarray # Data namelist
     fnlist : np.ndarray # Result file namelist
     data_type : np.ndarray # data type
-    stat_itemlist : list['CHI2NU', 'AIC_F', 'RChi_50', 'AIC_50']
+    chi2_itemlist : list['CHI2NU', 'AIC_F', 'RChi_50', 'AIC_50']
     #================== Will be input or made ===========
     val : np.ndarray = field(default_factory=lambda:
                              np.zeros(1)) # Value
@@ -3152,7 +2891,7 @@ class ResGalData:
 
     def read_data(self, itemlist):
         fnlist=self.fnlist
-        stat_itemlist=self.stat_itemlist
+        chi2_itemlist=self.chi2_itemlist
 
         ## Read data
         self.Next=np.zeros(len(fnlist)).astype(int)
@@ -3168,14 +2907,14 @@ class ResGalData:
                     self.war[i][item]=war
                 except: pass
 
-        stat_data, self.is_file_exist=read_galfit_header_singlevalues(fnlist,
-                                        itemlist=stat_itemlist, return_success=True)
+        chi2_flex, self.is_file_exist=read_galfit_header_singlevalues(fnlist,
+                                        itemlist=chi2_itemlist, return_success=True)
         self.Ndata=np.sum(self.is_file_exist)
 
-        for item in stat_itemlist:
-            self.val[item]=np.copy(stat_data[item])
-            self.err[item]=np.copy(stat_data[item])
-            self.war[item]=np.copy(stat_data[item])
+        for item in chi2_itemlist:
+            self.val[item]=np.copy(chi2_flex[item])
+            self.err[item]=np.copy(chi2_flex[item])
+            self.war[item]=np.copy(chi2_flex[item])
 
     ##============================ Save data ==============================
     def save_data(self, fn_output, add_header='', return_array=False):
@@ -3220,26 +2959,26 @@ class ResGalData:
 
 
 ##=============== PostProcessing ====================
-def convert_base_params_array(usingdat, is_mag=False):
+def convert_add_params_array(usingdat, is_mag=False):
     if(is_mag): comp=['XC', 'YC', 'MAG', 'RE', 'N', 'AR', 'PA']
     else: comp=['XC', 'YC', 'MU_E', 'RE', 'N', 'AR', 'PA']
     comp2=dharray.array_attach_string(comp, '2_', add_at_head=True)
     comp3=dharray.array_attach_string(comp, '3_', add_at_head=True)
     comp4=dharray.array_attach_string(comp, '4_', add_at_head=True)
-    base_params1_array=np.full((len(usingdat),7), np.nan)
-    base_params2_array=np.full((len(usingdat),7), np.nan)
-    base_params3_array=np.full((len(usingdat),7), np.nan)
+    add_params1_array=np.full((len(usingdat),7), np.nan)
+    add_params2_array=np.full((len(usingdat),7), np.nan)
+    add_params3_array=np.full((len(usingdat),7), np.nan)
     is_3rd_comp=np.isin(['4_XC'], usingdat.dtype.names)[0]
     for i in range (len(comp)):
-        base_params1_array[:,i]=usingdat[comp2[i]]
-        base_params2_array[:,i]=usingdat[comp3[i]]
-        if(is_3rd_comp): base_params3_array[:,i]=usingdat[comp4[i]]
+        add_params1_array[:,i]=usingdat[comp2[i]]
+        add_params2_array[:,i]=usingdat[comp3[i]]
+        if(is_3rd_comp): add_params3_array[:,i]=usingdat[comp4[i]]
 
     ## For 3rd comp, if the data has not N --> it might be PSF
-    is_psf=np.isfinite(base_params2_array[:,0]) &  np.isnan(base_params2_array[:,4])
-    is_sersic=np.isfinite(base_params2_array[:,0]) &  np.isfinite(base_params2_array[:,4])
-    base_params2_array[is_psf,2]=usingdat[is_psf]['3_MAG'] # Mu_e = mag
+    is_psf=np.isfinite(add_params2_array[:,0]) &  np.isnan(add_params2_array[:,4])
+    is_sersic=np.isfinite(add_params2_array[:,0]) &  np.isfinite(add_params2_array[:,4])
+    add_params2_array[is_psf,2]=usingdat[is_psf]['3_MAG'] # Mu_e = mag
     if(is_3rd_comp):
-        is_psf2=np.isfinite(base_params3_array[:,0]) &  np.isnan(base_params3_array[:,4])
-        base_params3_array[is_psf2,2]=usingdat[is_psf2]['4_MAG'] # Mu_e = mag
-    return is_sersic, base_params1_array, base_params2_array, base_params3_array
+        is_psf2=np.isfinite(add_params3_array[:,0]) &  np.isnan(add_params3_array[:,4])
+        add_params3_array[is_psf2,2]=usingdat[is_psf2]['4_MAG'] # Mu_e = mag
+    return is_sersic, add_params1_array, add_params2_array, add_params3_array

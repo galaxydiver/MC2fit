@@ -1,6 +1,5 @@
 import numpy as np
 import copy
-import inspect
 
 def unpackbits(x, num_bits):
     if np.issubdtype(x.dtype, np.floating):
@@ -50,71 +49,6 @@ def deg2dms(deg, hms=False, return_hms=False):
     if(is_justvalue==True): return answer[0] # If input value = just value, not ndarray -> return 1D array
     else: return answer # return 2D array
 
-
-def class_check_user_args(cls, local_vars):
-    """
-    Return user-provided arguments in __init__, safely handling arrays.
-
-    Parameters:
-    - cls: the class object (e.g., MyClass)
-    - local_vars: the dictionary from locals() inside __init__
-
-    Returns:
-    - A dictionary of user-supplied arguments (those different from defaults)
-    """
-    sig = inspect.signature(cls.__init__)
-    
-    # Extract default values
-    defaults = {
-        k: v.default for k, v in sig.parameters.items()
-        if v.default is not inspect.Parameter.empty and k != 'self'
-    }
-
-    user_args = {}
-    for k, v in local_vars.items():
-        if k not in defaults:
-            continue
-        default_v = defaults[k]
-
-        try:
-            # Use np.allclose or np.array_equal for array types
-            if isinstance(v, (list, tuple, np.ndarray)) or isinstance(default_v, (list, tuple, np.ndarray)):
-                if not np.array_equal(np.array(v), np.array(default_v)):
-                    user_args[k] = v
-            else:
-                if v != default_v:
-                    user_args[k] = v
-        except Exception:
-            # Fallback: If comparison fails, assume it's user-provided
-            user_args[k] = v
-
-    return user_args
-
-def class_update_keys(Class1, Class2=None, kwargs_update_only=False, **kwargs):
-    """
-    Update Class1 with Class2 and kwargs
-    INPUT
-     - Class1 : class to be updated
-     - Class2 : class to be used for update
-     - kwargs_update_only : if True, only update Class1 with kwargs
-     - kwargs : keyword arguments to be used for update
-    OUTPUT
-     - None : Class1 will be updated with Class2 and kwargs
-    """
-    if(Class2!=None):
-        for key, value in Class2.__dict__.items():
-            if key in Class1.__dict__:
-                setattr(Class1, key, copy.deepcopy(value))
-
-    ##====== Update with kwargs ======
-    if(kwargs_update_only):
-        for key, value in kwargs.items():
-            if key in Class1.__dict__:
-                setattr(Class1, key, copy.deepcopy(value))
-    else:
-        for key, value in kwargs.items():
-            setattr(Class1, key, copy.deepcopy(value))
-    return 
 
 class ClassCut():
     def __init__(self, OriginalClass,
@@ -509,27 +443,3 @@ def make_aperture_mask(imgsize, radius, center=-1):
     check=np.where((mx-center)**2 + (my-center)**2 <= radius**2)
     mask[check]=0
     return mask
-
-def inverse_var_weighted_mean(data, err):
-    nonnan=np.where(np.isfinite(data) & np.isfinite(err))
-    w = 1/(err**2)
-    mean = np.sum(w[nonnan]*data[nonnan])/np.sum(w[nonnan])
-    eom = (1/np.sum(w[nonnan]))**0.5
-    return mean, eom
-
-def inverse_var_weighted_std(data, err):
-    # Weighted sample standard deviation
-
-    nonnan=np.where(np.isfinite(data) & np.isfinite(err))
-
-    w = 1/(err**2)
-    mean, __ = inverse_var_weighted_mean(data, err)
-
-    term1 = w[nonnan] * (data[nonnan] - mean)**2
-    s = (np.sum(term1)/np.sum(w[nonnan]))**0.5
-
-    print(s)
-    N = len(data[nonnan])
-
-    s_err = s / (2*(N-1))**0.5
-    return s, s_err

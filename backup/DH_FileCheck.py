@@ -315,29 +315,23 @@ def multicore_copy_folder(dir_work_list, Ncore=2, fna_prev='', fna_new='', show_
     print("Done! | Time : ", time.time()-start)
 
 
-def multicore_generate_link_img(DirInfo, DirInfo2, CheckPixel, show_progress=10000, Ncore=2,
+def multicore_generate_link(DirInfo, DirInfo2, CheckPixel, show_progress=10000, Ncore=2,
                             bandlist=['g', 'r'],
                             dr_north='dr9', dr_south='dr10',
                             is_psf_others=False,
-                            is_maskbits=False,
-                            makedir=True):
+                            is_maskbits=False):
     global sub_generate_link
     def sub_generate_link(i):
         dir_work_src=os.path.abspath(DirInfo.dir_work_list[i])+"/"
         dir_work_dst=os.path.abspath(DirInfo2.dir_work_list[i])+"/"
-        if(makedir): os.makedirs(dir_work_dst, exist_ok=True)
-        if(CheckPixel==None):
-            dr=''
-            region=''
-        else:
-            if(CheckPixel.list_bad[i]==True): return
-            elif(CheckPixel.list_s[i]==True):
-                region='s'
-                dr=dr_south
-            elif(CheckPixel.list_n[i]==True):
-                region='n'
-                dr=dr_north
-            else: print("Error! ", i)
+        if(CheckPixel.list_bad[i]==True): return
+        elif(CheckPixel.list_s[i]==True):
+            region='s'
+            dr=dr_south
+        elif(CheckPixel.list_n[i]==True):
+            region='n'
+            dr=dr_north
+        else: print("Error! ", i)
 
         for band in ['g', 'r']:
             src=dir_work_src+"image_"+dr+"_"+region+band+".fits"
@@ -371,45 +365,6 @@ def multicore_generate_link_img(DirInfo, DirInfo2, CheckPixel, show_progress=100
             dst=dir_work_dst+"maskbits_lx.fits"
             force_symlink(src, dst)
 
-
-        if(show_progress>0):
-            if(i%show_progress==0): print(i, "/", len(DirInfo.dir_work_list), "| Time : ", time.time()-start)
-
-    start=time.time()
-    pool = Pool(processes=int(Ncore))
-    pool.map(sub_generate_link, np.arange(len(DirInfo.dir_work_list)))
-    print("Done! | Time : ", time.time()-start)
-    pool.close()
-    pool.join()
-
-
-def multicore_generate_link_galfit(DirInfo, 
-                                   MC2fitSettingClass1=None, MC2fitSettingClass2=None, ## Input 1
-                                   Runlist=None, dir1=None, dir2=None,  ## Alternative Input 2
-                                   show_progress=10000, Ncore=2,
-                            makedir=True):
-    global sub_generate_link
-    def sub_generate_link(i):
-        if(Runlist==None):
-            dir1 = MC2fitSettingClass1.proj_folder
-            dir2 = MC2fitSettingClass2.proj_folder
-            namelist=MC2fitSettingClass1.RunlistClass.runlist['name']
-        else:
-            namelist=Runlist.runlist['name']
-
-        dir_work_src=os.path.abspath(DirInfo.dir_work_list[i])+"/"+dir1+"/"
-        dir_work_dst=os.path.abspath(DirInfo.dir_work_list[i])+"/"+dir2+"/"
-
-        if(makedir): 
-            os.makedirs(dir_work_dst, exist_ok=True)
-
-        fnlist=dharray.array_attach_string(namelist, 'result_', add_at_head=True)
-        fnlist=dharray.array_attach_string(fnlist, '.fits')
-        for name in fnlist:
-            src = dir_work_src+name
-            dst = dir_work_dst+name
-            if(os.path.exists(src)):
-                force_symlink(src, dst)
 
         if(show_progress>0):
             if(i%show_progress==0): print(i, "/", len(DirInfo.dir_work_list), "| Time : ", time.time()-start)
