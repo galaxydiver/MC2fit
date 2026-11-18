@@ -263,17 +263,25 @@ def masking_blur(mask, kernel_value=0.2):
     return blur
 
 
-def make_aperture_mask(imgsize, radius, yrad=None, center=-1, xpos=None, ypos=None, invert=True):
+def make_aperture_mask(imgsize, radius, yrad=None, center=-1, xpos=None, ypos=None, invert=True,
+                      angle=0, plate_scale_ratio=1):
     """
     make an aperture mask with a given radius.
     If center<0, center is half of the image size.
     The manual center (xpos, ypos) can be given.
     If invert is true, mask outside (inner part is 0)
     """
+
+    ## Make a grid
     if(hasattr(imgsize, "__len__")==False):
         imgsize=(imgsize, imgsize)
     mask=np.zeros(imgsize, dtype=int)
     mx, my=np.mgrid[0:imgsize[0],0:imgsize[1]]
+
+    grid=np.dstack((mx, my))
+
+    ## Parameters
+
     if((xpos==None) & (ypos==None)): ## Image center
         if(center<0): center=(imgsize[0]/2, imgsize[1]/2)
         xpos=center[0]
@@ -281,9 +289,18 @@ def make_aperture_mask(imgsize, radius, yrad=None, center=-1, xpos=None, ypos=No
     if(yrad==None):  ## circle
         yrad=radius
 
-    #check=np.where((mx-xpos)**2 + (my-ypos)**2 <= radius**2)
-    check=np.where( ((mx-xpos)**2)/radius**2 + ((my-ypos)**2)/yrad**2 <= 1)
+    ## Ellipse
+    angle_rad = np.radians(angle)
+    cos_angle = np.cos(angle_rad)
+    sin_angle = np.sin(angle_rad)
 
+    x_shifted = grid[..., 0] - xpos
+    y_shifted = (grid[..., 1] - ypos)/plate_scale_ratio
+
+    x_rot = x_shifted * cos_angle + y_shifted * sin_angle
+    y_rot = -x_shifted * sin_angle + y_shifted * cos_angle
+
+    check = (x_rot**2 / (radius)**2) + (y_rot**2 / (yrad)**2) <= 1
 
     # else:
         # mask=np.zeros((imgsize, imgsize), dtype=int)

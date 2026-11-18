@@ -4,13 +4,14 @@ from multiprocessing import Pool
 import time
 from tqdm import tqdm
 
-def multicore_run(loop_ftn, loop_len, Ncore=1, show_progress=10000, debug=False,
+def multicore_run(loop_ftn, loop_len, Ncore=1, show_progress=10000,
                   use_try=False, use_zip=False, errorcode=np.nan,
-                  record=False, record_fn='done.dat'):
-    if(debug):
-        print('Multicore run for {} with Ncore'.format(loop_ftn.__name__), Ncore)
-        print('show_progress : ', show_progress)
-        print('Using Try : ', use_try)
+                  show_summary=True,
+                  record=False, record_fn='done.dat',
+                  **kwargs):
+    print("======== Multicore Briefing ========")
+    print('● Multicore run for {} with Ncore'.format(loop_ftn.__name__), Ncore)
+    print('● Using Try (Ignoring Errors):', use_try)
 
     global try_wrapper_function, wrapper_function
     ### =========== Wrapping ==========================
@@ -56,4 +57,19 @@ def multicore_run(loop_ftn, loop_len, Ncore=1, show_progress=10000, debug=False,
         pool.join()
 
     print("Done! | Time : ", time.time()-start)
+
+    if(use_zip==False):
+        if(show_summary):
+            result=np.array(results_array).astype(float)
+            Nfailed=np.sum(np.isnan(result))
+            Nwarning=np.sum(result!=0)
+            print("======== Multicore summary ========")
+            print("● Succeed: %d / %d"%(np.sum(result==0), len(result)))
+            print("● Failed: %d / %d"%(Nfailed, len(result)))
+            print("● Warning (w/failed): %d / %d"%(Nwarning, len(result)))
+            if(Nfailed>0):
+                print(">> See where: self.multi_res")
+                print(">> To debug, use Ncore=1, and use_try = False")
+            print("==================================\n")
+
     return results_array
